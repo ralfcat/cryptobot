@@ -37,38 +37,21 @@ npm start
 
 Open the dashboard at `http://localhost:8787` (or whatever `PORT` you set).
 
-## Containerization
+## Training dataset builder
 
-### Services
-- **bot**: Node.js 18 runtime that runs `npm start` for the trading bot.
-- **trainer**: Python 3.11 runtime for model training. Replace `trainer/train.py` with your training code.
-
-### Environment variables
-The bot service expects the same variables as `.env.example`:
-
-```
-RPC_URL=...
-BIRDEYE_API_KEY=...
-JUP_API_KEY=...
-KEYPAIR_PATH=/app/keys/keypair.json
-PORT=8787
-```
-
-### Volume mounts
-The `docker-compose.yml` sets up shared volumes for datasets and models:
-
-- `./data/datasets` → `/app/data/datasets` (bot)
-- `./data/models` → `/app/data/models` (bot)
-- `./data/datasets` → `/trainer/data` (trainer)
-- `./data/models` → `/trainer/models` (trainer)
-
-These mounts let the trainer write datasets/models that the bot can later consume.
-
-### Run with Docker Compose
+Build reproducible ML datasets from `training_events.jsonl` and `trades.jsonl` (written by the bot). The builder merges features with labels derived from realized PnL or forward-return windows using stored OHLCV snapshots, and writes a versioned Parquet dataset.
 
 ```bash
-docker compose up --build
+node training/build_dataset.js --events training_events.jsonl --trades trades.jsonl --date 2024-01-15
 ```
+
+Output files are written to `data/datasets/{date}/train.parquet` with a `metadata.json` summary. You can override defaults with:
+
+```bash
+node training/build_dataset.js --windows 5,15,60 --pnl-window-hours 24 --out data/datasets
+```
+
+To enable Parquet output, install `parquetjs-lite` (network restrictions may require vendoring it). If the dependency is unavailable, the builder falls back to `train.jsonl` and reports the failure.
 
 ## Core rules implemented
 - **All-in trade** using available SOL minus a small fee buffer.
