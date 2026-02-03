@@ -30,6 +30,7 @@ const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
 const tradesPath = path.join(__dirname, "..", "trades.jsonl");
 const tradesCsvPath = path.join(__dirname, "..", "trades.csv");
+const trainingEventsPath = path.join(__dirname, "..", "training_events.jsonl");
 
 const ui = {
   status: "starting",
@@ -81,6 +82,91 @@ function pushTrade(entry) {
   fs.appendFileSync(tradesPath, `${JSON.stringify(record)}\n`);
   appendTradeCsv(record);
   broadcastUi();
+}
+
+function pushTrainingEvent(entry) {
+  const record = { t: nowMs(), ...entry };
+  fs.appendFileSync(trainingEventsPath, `${JSON.stringify(record)}\n`);
+}
+
+function buildDecisionMetadata(reason, cooldown) {
+  return {
+    reason,
+    cooldown,
+    thresholds: {
+      stopLossPct: config.stopLossPct,
+      takeProfitPct: config.takeProfitPct,
+      takeProfitUsd: config.takeProfitUsd,
+      exitSoftMinutes: config.exitSoftMinutes,
+      exitHardMinutes: config.exitHardMinutes,
+      minProfitToExtendPct: config.minProfitToExtendPct,
+      rsiLow: config.rsiLow,
+      emaFast: config.emaFast,
+      emaSlow: config.emaSlow,
+      bollPeriod: config.bollPeriod,
+      bollStd: config.bollStd,
+      volSpikeMult: config.volSpikeMult,
+      minLiquidityUsd: config.minLiquidityUsd,
+      minVol24hUsd: config.minVol24hUsd,
+      minVol15mUsd: config.minVol15mUsd,
+      minVolatilityPct: config.minVolatilityPct,
+      maxPriceImpactPct: config.maxPriceImpactPct,
+      maxTop10Pct: config.maxTop10Pct,
+      momentumMode: config.momentumMode,
+      momentumMinPctShort: config.momentumMinPctShort,
+      momentumMinPctLong: config.momentumMinPctLong,
+      momentumWeightShort: config.momentumWeightShort,
+      momentumWeightLong: config.momentumWeightLong,
+      flashWindowMinutes: config.flashWindowMinutes,
+      dexPriceChangeWindow: config.dexPriceChangeWindow,
+      dexMinPriceChangePct: config.dexMinPriceChangePct,
+    },
+  };
+}
+
+function buildEntrySnapshot(candidate) {
+  if (!candidate) return null;
+  return {
+    provider: candidate.provider,
+    address: candidate.address,
+    name: candidate.name,
+    score: candidate.score,
+    signal: candidate.signal,
+    momentum: candidate.momentum,
+    volatility: candidate.volatility,
+    priceImpactPct: candidate.priceImpactPct,
+    liquidityUsd: candidate.liquidityUsd ?? null,
+    volume: {
+      vol24hUsd: candidate.vol24hUsd ?? null,
+      vol15mUsd: candidate.vol15mUsd ?? null,
+    },
+    holdersPct: candidate.holdersPct ?? null,
+    marketContext: candidate.marketContext ?? null,
+  };
+}
+
+function buildTrainingEvent({
+  event,
+  side,
+  mint,
+  sig,
+  pnlPct,
+  profitUsd,
+  heldMinutes,
+  decision,
+  entrySnapshot,
+}) {
+  return {
+    event,
+    side,
+    mint,
+    sig,
+    pnlPct,
+    profitUsd,
+    heldMinutes,
+    decision,
+    entrySnapshot,
+  };
 }
 
 function csvEscape(value) {
@@ -264,6 +350,7 @@ async function pickCandidateBirdeye(connection, tradeLamports) {
 
     let overview = null;
     let security = null;
+    let holdersPct = null;
 
     try {
       overview = await getTokenOverview(address);
@@ -329,6 +416,8 @@ async function pickCandidateBirdeye(connection, tradeLamports) {
       } else if (holders.pct !== null && holders.pct > config.maxTop10Pct) {
         stats.holdersTooHigh += 1;
         continue;
+      } else if (holders.pct !== null) {
+        holdersPct = holders.pct;
       }
     }
 
@@ -411,6 +500,15 @@ async function pickCandidateBirdeye(connection, tradeLamports) {
       momentum,
       volatility,
       priceImpactPct,
+      provider: "birdeye",
+      liquidityUsd,
+      vol24hUsd,
+      vol15mUsd: vol15m,
+      holdersPct,
+      marketContext: {
+        ohlcv: { interval: "1m", windowMinutes: 60, candles },
+        token: { address, name, overview, security },
+      },
     });
   }
 
@@ -544,6 +642,7 @@ async function pickCandidateDex(connection, tradeLamports) {
     const liquidityUsd = Number(pair?.liquidity?.usd || 0);
     const vol24hUsd = Number(pair?.volume?.h24 || 0);
     const vol15mUsd = dexVolume15m(pair);
+    let holdersPct = null;
 
     if (liquidityUsd && liquidityUsd < config.minLiquidityUsd) {
       stats.liquidityLow += 1;
@@ -595,6 +694,8 @@ async function pickCandidateDex(connection, tradeLamports) {
       } else if (holders.pct !== null && holders.pct > config.maxTop10Pct) {
         stats.holdersTooHigh += 1;
         continue;
+      } else if (holders.pct !== null) {
+        holdersPct = holders.pct;
       }
     }
 
@@ -637,6 +738,15 @@ async function pickCandidateDex(connection, tradeLamports) {
       volatility,
       priceImpactPct,
       dexPair: pair,
+      provider: "dexscreener",
+      liquidityUsd,
+      vol24hUsd,
+      vol15mUsd,
+      holdersPct,
+      marketContext: {
+        ohlcv: null,
+        token: { address, name, dexPair: pair },
+      },
     });
   }
 
@@ -844,6 +954,19 @@ async function run() {
           manualExitRequested = false;
           pushLog("info", `Exit tx: ${sig}`);
           pushTrade({ side: "sell", mint: position.mint, pnlPct, profitUsd, sig, reason: "manual" });
+          pushTrainingEvent(
+            buildTrainingEvent({
+              event: "exit",
+              side: "sell",
+              mint: position.mint,
+              sig,
+              pnlPct,
+              profitUsd,
+              heldMinutes,
+              decision: buildDecisionMetadata("manual", getCooldown(state)),
+              entrySnapshot: position.entrySnapshot ?? null,
+            })
+          );
           state.position = null;
           state.lastExitTimeMs = nowMs();
           saveState(state);
@@ -877,6 +1000,19 @@ async function run() {
           const sig = await exitPosition(connection, keypair, position);
           pushLog("info", `Exit tx: ${sig}`);
           pushTrade({ side: "sell", mint: position.mint, pnlPct, profitUsd, sig, reason: "account_stop" });
+          pushTrainingEvent(
+            buildTrainingEvent({
+              event: "exit",
+              side: "sell",
+              mint: position.mint,
+              sig,
+              pnlPct,
+              profitUsd,
+              heldMinutes,
+              decision: buildDecisionMetadata("account_stop", getCooldown(state)),
+              entrySnapshot: position.entrySnapshot ?? null,
+            })
+          );
           state.position = null;
           state.lastExitTimeMs = nowMs();
           saveState(state);
@@ -888,6 +1024,19 @@ async function run() {
           const sig = await exitPosition(connection, keypair, position);
           pushLog("info", `Exit tx: ${sig}`);
           pushTrade({ side: "sell", mint: position.mint, pnlPct, profitUsd, sig, reason: "stop_loss" });
+          pushTrainingEvent(
+            buildTrainingEvent({
+              event: "exit",
+              side: "sell",
+              mint: position.mint,
+              sig,
+              pnlPct,
+              profitUsd,
+              heldMinutes,
+              decision: buildDecisionMetadata("stop_loss", getCooldown(state)),
+              entrySnapshot: position.entrySnapshot ?? null,
+            })
+          );
           state.position = null;
           state.lastExitTimeMs = nowMs();
           saveState(state);
@@ -899,6 +1048,19 @@ async function run() {
           const sig = await exitPosition(connection, keypair, position);
           pushLog("info", `Exit tx: ${sig}`);
           pushTrade({ side: "sell", mint: position.mint, pnlPct, profitUsd, sig, reason: "take_profit" });
+          pushTrainingEvent(
+            buildTrainingEvent({
+              event: "exit",
+              side: "sell",
+              mint: position.mint,
+              sig,
+              pnlPct,
+              profitUsd,
+              heldMinutes,
+              decision: buildDecisionMetadata("take_profit", getCooldown(state)),
+              entrySnapshot: position.entrySnapshot ?? null,
+            })
+          );
           state.position = null;
           state.lastExitTimeMs = nowMs();
           saveState(state);
@@ -910,6 +1072,19 @@ async function run() {
           const sig = await exitPosition(connection, keypair, position);
           pushLog("info", `Exit tx: ${sig}`);
           pushTrade({ side: "sell", mint: position.mint, pnlPct, profitUsd, sig, reason: "hard_time" });
+          pushTrainingEvent(
+            buildTrainingEvent({
+              event: "exit",
+              side: "sell",
+              mint: position.mint,
+              sig,
+              pnlPct,
+              profitUsd,
+              heldMinutes,
+              decision: buildDecisionMetadata("hard_time", getCooldown(state)),
+              entrySnapshot: position.entrySnapshot ?? null,
+            })
+          );
           state.position = null;
           state.lastExitTimeMs = nowMs();
           saveState(state);
@@ -923,6 +1098,19 @@ async function run() {
             const sig = await exitPosition(connection, keypair, position);
             pushLog("info", `Exit tx: ${sig}`);
             pushTrade({ side: "sell", mint: position.mint, pnlPct, profitUsd, sig, reason: "soft_time" });
+            pushTrainingEvent(
+              buildTrainingEvent({
+                event: "exit",
+                side: "sell",
+                mint: position.mint,
+                sig,
+                pnlPct,
+                profitUsd,
+                heldMinutes,
+                decision: buildDecisionMetadata("soft_time", getCooldown(state)),
+                entrySnapshot: position.entrySnapshot ?? null,
+              })
+            );
             state.position = null;
             state.lastExitTimeMs = nowMs();
             saveState(state);
@@ -1009,10 +1197,13 @@ async function run() {
             "info",
             `Entering ${candidate.name || candidate.address} impact ${candidate.priceImpactPct?.toFixed?.(2) ?? "?"}%${volatilityNote}${momentumNote}`
           );
+          const entrySnapshot = buildEntrySnapshot(candidate);
           const position = await enterPosition(connection, keypair, tradeLamports, candidate);
+          position.entrySnapshot = entrySnapshot;
           state.position = position;
           state.lastTradeTimeMs = nowMs();
           saveState(state);
+          const entryCooldown = getCooldown(state);
           pushTrade({
             side: "buy",
             mint: position.mint,
@@ -1021,6 +1212,19 @@ async function run() {
             sig: position.signature,
             reason: "entry",
           });
+          pushTrainingEvent(
+            buildTrainingEvent({
+              event: "entry",
+              side: "buy",
+              mint: position.mint,
+              sig: position.signature,
+              pnlPct: 0,
+              profitUsd: 0,
+              heldMinutes: 0,
+              decision: buildDecisionMetadata("entry", entryCooldown),
+              entrySnapshot,
+            })
+          );
           pushLog("info", `Entry tx: ${position.signature}`);
         }
       }
