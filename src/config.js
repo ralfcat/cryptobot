@@ -44,6 +44,7 @@ const config = {
 
   host: process.env.HOST || "0.0.0.0",
   port: num("PORT", 8787),
+  mode: (process.env.MODE || "sharp").toLowerCase(),
   uiRefreshSeconds: num("UI_REFRESH_SECONDS", 5),
   scanIntervalSeconds: num("SCAN_INTERVAL_SECONDS", 30),
 
@@ -54,6 +55,11 @@ const config = {
   accountStopUsd: num("ACCOUNT_STOP_USD", 10),
   takeProfitPct: num("TAKE_PROFIT_PCT", 12),
   takeProfitUsd: num("TAKE_PROFIT_USD", 1),
+
+  simulatorMode: bool("SIMULATOR_MODE", false),
+  simulatorStartSol: num("SIMULATOR_START_SOL", 0),
+  simulatorStartUsd: num("SIMULATOR_START_USD", 0),
+  simulatorFeeBufferSol: num("SIMULATOR_FEE_BUFFER_SOL", 0.01),
 
   exitSoftMinutes: num("EXIT_SOFT_MINUTES", 15),
   exitHardMinutes: num("EXIT_HARD_MINUTES", 60),
@@ -68,6 +74,10 @@ const config = {
   flashWindowMinutes: num("FLASH_WINDOW_MINUTES", 15),
   minVolatilityPct: num("MIN_VOLATILITY_PCT", 3),
   volatilityWeight: num("VOLATILITY_WEIGHT", 2),
+  rugRiskMaxScore: num("RUG_RISK_MAX_SCORE", -1),
+  rugRiskWeight: num("RUG_RISK_WEIGHT", 0),
+  rugRiskHoldersPct: num("RUG_RISK_HOLDERS_PCT", 35),
+  rugSampleLog: bool("RUG_SAMPLE_LOG", true),
 
   momentumMode: bool("MOMENTUM_MODE", false),
   momentumShortMinutes: num("MOMENTUM_SHORT_MINUTES", 15),

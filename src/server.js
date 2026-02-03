@@ -8,7 +8,7 @@ const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
 const publicDir = path.join(__dirname, "..", "public");
 
-export function startServer({ port, host, onSellNow, onResetCooldown }) {
+export function startServer({ port, host, onSellNow, onResetCooldown, onSetMode }) {
   const app = express();
   app.use(express.static(publicDir));
   app.use(express.json());
@@ -42,6 +42,28 @@ export function startServer({ port, host, onSellNow, onResetCooldown }) {
         return;
       }
       res.json({ ok: true, ...result });
+    } catch (err) {
+      res.status(500).json({ ok: false, error: err?.message || String(err) });
+    }
+  });
+
+  app.post("/api/mode", async (req, res) => {
+    if (!onSetMode) {
+      res.status(503).json({ ok: false, error: "mode_unavailable" });
+      return;
+    }
+    const mode = String(req.body?.mode || "").toLowerCase();
+    if (!["sharp", "simulator"].includes(mode)) {
+      res.status(400).json({ ok: false, error: "invalid_mode" });
+      return;
+    }
+    try {
+      const result = await onSetMode(mode);
+      if (result?.ok === false) {
+        res.status(409).json(result);
+        return;
+      }
+      res.json({ ok: true, mode, ...result });
     } catch (err) {
       res.status(500).json({ ok: false, error: err?.message || String(err) });
     }

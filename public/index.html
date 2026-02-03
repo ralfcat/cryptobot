@@ -281,6 +281,62 @@
         gap: 10px;
       }
 
+      .mode-toggle {
+        display: flex;
+        flex-direction: column;
+        gap: 8px;
+        padding: 12px;
+        border-radius: 12px;
+        background: rgba(255, 255, 255, 0.04);
+        border: 1px solid rgba(255, 255, 255, 0.06);
+      }
+
+      .mode-label {
+        font-size: 12px;
+        color: var(--muted);
+        text-transform: uppercase;
+        letter-spacing: 1px;
+      }
+
+      .mode-buttons {
+        display: grid;
+        grid-template-columns: repeat(2, minmax(140px, 1fr));
+        gap: 10px;
+      }
+
+      .mode-btn {
+        appearance: none;
+        border: 1px solid transparent;
+        border-radius: 999px;
+        padding: 10px 14px;
+        font-weight: 600;
+        color: var(--text);
+        background: rgba(255, 255, 255, 0.06);
+        cursor: pointer;
+        transition: background 0.2s ease, border-color 0.2s ease, transform 0.2s ease;
+      }
+
+      .mode-btn:hover {
+        transform: translateY(-1px);
+      }
+
+      .mode-btn.active {
+        border-color: rgba(255, 255, 255, 0.4);
+        background: linear-gradient(135deg, rgba(46, 196, 182, 0.4), rgba(6, 214, 160, 0.35));
+        box-shadow: 0 10px 20px rgba(46, 196, 182, 0.2);
+      }
+
+      .mode-btn:disabled {
+        cursor: not-allowed;
+        opacity: 0.5;
+        transform: none;
+      }
+
+      .mode-status {
+        font-size: 12px;
+        color: var(--muted);
+      }
+
       .btn {
         appearance: none;
         border: none;
@@ -401,6 +457,14 @@
         <section class="card">
           <h3>Controls</h3>
           <div class="control-row">
+            <div class="mode-toggle">
+              <div class="mode-label">Mode</div>
+              <div class="mode-buttons">
+                <button id="mode-sharp" class="mode-btn" type="button">Sharp-mode</button>
+                <button id="mode-simulator" class="mode-btn" type="button">Simulator mode</button>
+              </div>
+              <div id="mode-status" class="mode-status">Active: -</div>
+            </div>
             <div class="control-buttons">
               <button id="sell-now" class="btn" type="button">Sell now</button>
               <button id="reset-cooldown" class="btn btn-secondary" type="button">Reset cooldown</button>
