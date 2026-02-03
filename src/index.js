@@ -335,6 +335,7 @@ async function pickCandidateBirdeye(connection, tradeLamports) {
   const scanList =
     config.candidateLimit && config.candidateLimit > 0 ? list.slice(0, config.candidateLimit) : list;
   const candidates = [];
+  const relaxedCandidates = [];
   const volatilityOnlyCandidates = [];
   const relaxedMomentumMinPctShort = 0;
   const relaxedMomentumMinPctLong = 0;
@@ -422,7 +423,6 @@ async function pickCandidateBirdeye(connection, tradeLamports) {
       continue;
     }
 
-    let holdersPct = null;
     if (config.maxTop10Pct > 0 && config.maxTop10Pct < 100 && !holdersCheckUnavailable) {
       const holders = await getTopHoldersPct(connection, mintPub, 10);
       if (holders.error) {
@@ -719,7 +719,6 @@ async function pickCandidateDex(connection, tradeLamports) {
       continue;
     }
 
-    let holdersPct = null;
     if (config.maxTop10Pct > 0 && config.maxTop10Pct < 100 && !holdersCheckUnavailable) {
       const holders = await getTopHoldersPct(connection, mintPub, 10);
       if (holders.error) {
