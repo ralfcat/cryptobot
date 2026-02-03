@@ -74,6 +74,9 @@ let holdersCheckUnavailable = false;
 let manualExitRequested = false;
 let manualExitRequestedAt = 0;
 let birdeyeBlockedUntilMs = 0;
+const appendQueue = [];
+let appendFlushTimer = null;
+let appendFlushing = false;
 
 function isSimulatorMode() {
   return currentMode === "simulator";
@@ -103,14 +106,14 @@ function pushTrade(entry) {
   const record = { t: nowMs(), ...entry };
   ui.trades.push(record);
   if (ui.trades.length > 200) ui.trades.shift();
-  fs.appendFileSync(tradesPath, `${JSON.stringify(record)}\n`);
+  enqueueAppend(tradesPath, `${JSON.stringify(record)}\n`);
   appendTradeCsv(record);
   broadcastUi();
 }
 
 function pushTrainingEvent(entry) {
   const record = { t: nowMs(), ...entry };
-  fs.appendFileSync(trainingEventsPath, `${JSON.stringify(record)}\n`);
+  enqueueAppend(trainingEventsPath, `${JSON.stringify(record)}\n`);
 }
 
 function buildDecisionMetadata(reason, cooldown) {
@@ -206,7 +209,7 @@ function appendTradeCsv(record) {
   const headers = ["timestamp", "side", "mint", "pnlPct", "profitUsd", "sig", "reason"];
   const exists = fs.existsSync(tradesCsvPath);
   if (!exists || fs.statSync(tradesCsvPath).size === 0) {
-    fs.appendFileSync(tradesCsvPath, `${headers.join(",")}\n`);
+    enqueueAppend(tradesCsvPath, `${headers.join(",")}\n`);
   }
   const row = [
     new Date(record.t).toISOString(),
@@ -217,7 +220,38 @@ function appendTradeCsv(record) {
     record.sig ?? "",
     record.reason ?? "",
   ].map(csvEscape);
-  fs.appendFileSync(tradesCsvPath, `${row.join(",")}\n`);
+  enqueueAppend(tradesCsvPath, `${row.join(",")}\n`);
+}
+
+function enqueueAppend(filePath, payload) {
+  appendQueue.push({ filePath, payload });
+  scheduleAppendFlush();
+}
+
+function scheduleAppendFlush() {
+  if (appendFlushTimer) return;
+  appendFlushTimer = setTimeout(() => {
+    appendFlushTimer = null;
+    void flushAppendQueue();
+  }, 25);
+}
+
+async function flushAppendQueue() {
+  if (appendFlushing) return;
+  appendFlushing = true;
+  try {
+    while (appendQueue.length) {
+      const { filePath, payload } = appendQueue.shift();
+      try {
+        await fs.promises.appendFile(filePath, payload);
+      } catch (err) {
+        console.error(`Failed to append to ${filePath}: ${err?.message || String(err)}`);
+      }
+    }
+  } finally {
+    appendFlushing = false;
+    if (appendQueue.length) scheduleAppendFlush();
+  }
 }
 
 async function logSendTransactionError(err, connection) {
