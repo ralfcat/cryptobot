@@ -23,6 +23,7 @@ export function startServer({
   const app = express();
   app.use(express.static(publicDir));
   app.use(express.json());
+  const apiKey = process.env.UI_API_KEY;
 
   const ensureStatsAuth = (req, res) => {
     if (!statsApiKey) return true;
@@ -51,7 +52,7 @@ export function startServer({
     }
   });
 
-  app.post("/api/reset-cooldown", async (req, res) => {
+  app.post("/api/reset-cooldown", requireApiKey, async (req, res) => {
     if (!onResetCooldown) {
       res.status(503).json({ ok: false, error: "reset_cooldown_unavailable" });
       return;
@@ -68,7 +69,7 @@ export function startServer({
     }
   });
 
-  app.post("/api/mode", async (req, res) => {
+  app.post("/api/mode", requireApiKey, async (req, res) => {
     if (!onSetMode) {
       res.status(503).json({ ok: false, error: "mode_unavailable" });
       return;
