@@ -956,6 +956,12 @@ async function run() {
   const ensureNumber = (value, fallback = 0) => (Number.isFinite(value) ? value : fallback);
   state.simBalanceSol = ensureNumber(state.simBalanceSol, 0);
   state.simBalanceUsd = ensureNumber(state.simBalanceUsd, 0);
+  const applySimExit = (outSol, solUsdNow) => {
+    if (!isSimulator) return;
+    const updatedSol = ensureNumber(state.simBalanceSol, 0) + ensureNumber(outSol, 0);
+    state.simBalanceSol = Math.max(0, updatedSol);
+    state.simBalanceUsd = state.simBalanceSol * ensureNumber(solUsdNow, 0);
+  };
 
   const resolveSimulatorStartBalance = async () => {
     if (config.simulatorStartSol > 0) return config.simulatorStartSol;
@@ -1060,7 +1066,8 @@ async function run() {
           pnlPct = pctChange(position.entrySol, outSol);
           const solUsdNow = solUsd ?? (await getSolUsdPriceCached());
           profitUsd = (outSol - position.entrySol) * solUsdNow;
-          const exitResult = await exitPosition(connection, keypair, position, { simulate: isSimulator });
+          const { sig, outSol: exitOutSol } = await exitPosition(connection, keypair, position);
+          applySimExit(exitOutSol, solUsdNow);
           manualExitRequested = false;
           pushLog("info", `Exit tx: ${sig}`);
           pushTrade({ side: "sell", mint: position.mint, pnlPct, profitUsd, sig, reason: "manual" });
@@ -1079,7 +1086,6 @@ async function run() {
           );
           state.position = null;
           state.lastExitTimeMs = nowMs();
-          if (isSimulator) state.simBalanceUsd = state.simBalanceSol * (solUsdNow || 0);
           saveState(state);
           continue;
         }
@@ -1108,7 +1114,8 @@ async function run() {
 
         if (totalValueUsd !== null && totalValueUsd <= config.accountStopUsd) {
           pushLog("warn", "Account stop triggered. Exiting.");
-          const sig = await exitPosition(connection, keypair, position);
+          const { sig, outSol: exitOutSol } = await exitPosition(connection, keypair, position);
+          applySimExit(exitOutSol, solUsd ?? (await getSolUsdPriceCached()));
           pushLog("info", `Exit tx: ${sig}`);
           pushTrade({ side: "sell", mint: position.mint, pnlPct, profitUsd, sig, reason: "account_stop" });
           pushTrainingEvent(
@@ -1132,7 +1139,8 @@ async function run() {
 
         if (pnlPct !== null && pnlPct <= -config.stopLossPct * 100) {
           pushLog("warn", "Stop loss triggered. Exiting.");
-          const sig = await exitPosition(connection, keypair, position);
+          const { sig, outSol: exitOutSol } = await exitPosition(connection, keypair, position);
+          applySimExit(exitOutSol, solUsd ?? (await getSolUsdPriceCached()));
           pushLog("info", `Exit tx: ${sig}`);
           pushTrade({ side: "sell", mint: position.mint, pnlPct, profitUsd, sig, reason: "stop_loss" });
           pushTrainingEvent(
@@ -1156,7 +1164,8 @@ async function run() {
 
         if (pnlPct !== null && profitUsd !== null && shouldTakeProfit(pnlPct, profitUsd)) {
           pushLog("info", "Take profit triggered. Exiting.");
-          const sig = await exitPosition(connection, keypair, position);
+          const { sig, outSol: exitOutSol } = await exitPosition(connection, keypair, position);
+          applySimExit(exitOutSol, solUsd ?? (await getSolUsdPriceCached()));
           pushLog("info", `Exit tx: ${sig}`);
           pushTrade({ side: "sell", mint: position.mint, pnlPct, profitUsd, sig, reason: "take_profit" });
           pushTrainingEvent(
@@ -1180,7 +1189,8 @@ async function run() {
 
         if (timeStopHit) {
           pushLog("info", "Hard time stop. Exiting.");
-          const sig = await exitPosition(connection, keypair, position);
+          const { sig, outSol: exitOutSol } = await exitPosition(connection, keypair, position);
+          applySimExit(exitOutSol, solUsd ?? (await getSolUsdPriceCached()));
           pushLog("info", `Exit tx: ${sig}`);
           pushTrade({ side: "sell", mint: position.mint, pnlPct, profitUsd, sig, reason: "hard_time" });
           pushTrainingEvent(
@@ -1206,7 +1216,8 @@ async function run() {
           const canExtend = pnlPct !== null && pnlPct >= config.minProfitToExtendPct && (await shouldExtendHold(position));
           if (!canExtend) {
             pushLog("info", "Soft time stop. Exiting.");
-            const sig = await exitPosition(connection, keypair, position);
+            const { sig, outSol: exitOutSol } = await exitPosition(connection, keypair, position);
+            applySimExit(exitOutSol, solUsd ?? (await getSolUsdPriceCached()));
             pushLog("info", `Exit tx: ${sig}`);
             pushTrade({ side: "sell", mint: position.mint, pnlPct, profitUsd, sig, reason: "soft_time" });
             pushTrainingEvent(
