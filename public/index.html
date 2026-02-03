@@ -14,6 +14,7 @@
         --card-2: #0f1420;
         --accent: #ff6b35;
         --accent-2: #2ec4b6;
+        --accent-3: #7a5cff;
         --text: #eef2f7;
         --muted: #8b96a6;
         --warn: #f7b801;
@@ -32,7 +33,8 @@
         color: var(--text);
         background: radial-gradient(1200px 700px at 10% 0%, #1e2433 0%, var(--bg-1) 45%)
             fixed,
-          radial-gradient(900px 600px at 90% 10%, #222a3a 0%, var(--bg-2) 50%) fixed;
+          radial-gradient(900px 600px at 90% 10%, #222a3a 0%, var(--bg-2) 50%) fixed,
+          radial-gradient(400px 400px at 40% 60%, rgba(122, 92, 255, 0.15), transparent) fixed;
         min-height: 100vh;
         padding: 28px;
       }
@@ -52,9 +54,11 @@
         gap: 16px;
         padding: 18px 20px;
         border-radius: 16px;
-        background: linear-gradient(135deg, rgba(255, 107, 53, 0.12), rgba(46, 196, 182, 0.06));
+        background: linear-gradient(135deg, rgba(255, 107, 53, 0.12), rgba(46, 196, 182, 0.06)),
+          rgba(13, 16, 24, 0.7);
         border: 1px solid rgba(255, 255, 255, 0.06);
         box-shadow: 0 12px 30px var(--shadow);
+        backdrop-filter: blur(12px);
       }
 
       .brand {
@@ -114,6 +118,12 @@
         gap: 16px;
       }
 
+      .kpi-grid {
+        display: grid;
+        grid-template-columns: repeat(auto-fit, minmax(220px, 1fr));
+        gap: 16px;
+      }
+
       .grid-wide {
         display: grid;
         grid-template-columns: 1fr;
@@ -121,12 +131,41 @@
       }
 
       .card {
-        background: linear-gradient(160deg, var(--card), var(--card-2));
+        background: linear-gradient(160deg, rgba(18, 24, 38, 0.96), rgba(12, 16, 28, 0.96));
         border-radius: 16px;
         padding: 16px;
         border: 1px solid rgba(255, 255, 255, 0.05);
         box-shadow: 0 10px 25px var(--shadow);
         animation: fadeUp 0.6s ease forwards;
+        backdrop-filter: blur(14px);
+      }
+
+      .kpi-card {
+        background: linear-gradient(135deg, rgba(122, 92, 255, 0.2), rgba(18, 24, 38, 0.9));
+        border-radius: 16px;
+        padding: 16px;
+        border: 1px solid rgba(255, 255, 255, 0.08);
+        box-shadow: 0 12px 30px var(--shadow);
+        display: flex;
+        flex-direction: column;
+        gap: 10px;
+      }
+
+      .kpi-card span {
+        color: var(--muted);
+        text-transform: uppercase;
+        font-size: 12px;
+        letter-spacing: 1px;
+      }
+
+      .kpi-card strong {
+        font-size: 22px;
+        font-family: "JetBrains Mono", ui-monospace, monospace;
+      }
+
+      .kpi-foot {
+        font-size: 12px;
+        color: var(--muted);
       }
 
       .performance-header {
@@ -262,6 +301,70 @@
         text-transform: uppercase;
         letter-spacing: 0.6px;
         background: rgba(255, 255, 255, 0.08);
+      }
+
+      .analytics-grid {
+        display: grid;
+        grid-template-columns: repeat(auto-fit, minmax(240px, 1fr));
+        gap: 12px;
+      }
+
+      .analytics-item {
+        padding: 10px 12px;
+        border-radius: 12px;
+        background: rgba(255, 255, 255, 0.04);
+        border: 1px solid rgba(255, 255, 255, 0.06);
+        display: flex;
+        flex-direction: column;
+        gap: 4px;
+      }
+
+      .analytics-item span {
+        font-size: 12px;
+        color: var(--muted);
+        text-transform: uppercase;
+        letter-spacing: 0.8px;
+      }
+
+      .analytics-item strong {
+        font-family: "JetBrains Mono", ui-monospace, monospace;
+      }
+
+      .task-list {
+        display: grid;
+        gap: 10px;
+      }
+
+      .task-item {
+        display: flex;
+        align-items: center;
+        justify-content: space-between;
+        gap: 12px;
+        padding: 10px 12px;
+        border-radius: 12px;
+        background: rgba(255, 255, 255, 0.03);
+        border: 1px solid rgba(255, 255, 255, 0.05);
+      }
+
+      .task-meta {
+        display: flex;
+        flex-direction: column;
+        gap: 4px;
+      }
+
+      .task-meta span {
+        font-size: 12px;
+        color: var(--muted);
+      }
+
+      .task-pill {
+        padding: 4px 8px;
+        border-radius: 999px;
+        font-size: 11px;
+        text-transform: uppercase;
+        letter-spacing: 0.6px;
+        background: rgba(122, 92, 255, 0.2);
+        color: #c8b8ff;
       }
 
       .footer {
@@ -423,6 +526,29 @@
         </div>
       </header>
 
+      <div class="kpi-grid">
+        <section class="kpi-card">
+          <span>Net PnL</span>
+          <strong id="kpi-net-pnl">-</strong>
+          <div class="kpi-foot" id="kpi-net-pnl-sub">Rolling 30 trades</div>
+        </section>
+        <section class="kpi-card">
+          <span>Win Rate</span>
+          <strong id="kpi-win-rate">-</strong>
+          <div class="kpi-foot" id="kpi-win-rate-sub">Closed trades</div>
+        </section>
+        <section class="kpi-card">
+          <span>Max Drawdown</span>
+          <strong id="kpi-drawdown">-</strong>
+          <div class="kpi-foot" id="kpi-drawdown-sub">From equity curve</div>
+        </section>
+        <section class="kpi-card">
+          <span>Sharpe (proxy)</span>
+          <strong id="kpi-sharpe">-</strong>
+          <div class="kpi-foot" id="kpi-sharpe-sub">PnL volatility</div>
+        </section>
+      </div>
+
       <div class="grid">
         <section class="card">
           <h3>Balances</h3>
@@ -452,6 +578,36 @@
           <div class="metric"><span>Cooldown</span><strong id="cooldown">-</strong></div>
           <div class="metric"><span>Next entry</span><strong id="next-entry">-</strong></div>
           <div class="metric"><span>Last update</span><strong id="last-update">-</strong></div>
+        </section>
+
+        <section class="card">
+          <h3>Analytics</h3>
+          <div class="analytics-grid">
+            <div class="analytics-item">
+              <span>Profit factor</span>
+              <strong id="ana-profit-factor">-</strong>
+            </div>
+            <div class="analytics-item">
+              <span>Expectancy / trade</span>
+              <strong id="ana-expectancy">-</strong>
+            </div>
+            <div class="analytics-item">
+              <span>Volatility (σ)</span>
+              <strong id="ana-volatility">-</strong>
+            </div>
+            <div class="analytics-item">
+              <span>Trades (24h)</span>
+              <strong id="ana-velocity">-</strong>
+            </div>
+            <div class="analytics-item">
+              <span>Avg slippage</span>
+              <strong id="ana-slippage">-</strong>
+            </div>
+            <div class="analytics-item">
+              <span>Exposure</span>
+              <strong id="ana-exposure">-</strong>
+            </div>
+          </div>
         </section>
 
         <section class="card">
@@ -501,6 +657,33 @@
       </div>
 
       <div class="grid">
+        <section class="card">
+          <h3>TASKS</h3>
+          <div class="task-list">
+            <div class="task-item">
+              <div class="task-meta">
+                <strong>Deep liquidity routing</strong>
+                <span>Scan top pools and update routes every 10 minutes.</span>
+              </div>
+              <span class="task-pill">Priority</span>
+            </div>
+            <div class="task-item">
+              <div class="task-meta">
+                <strong>Risk guardrails</strong>
+                <span>Auto tighten stops when volatility spikes.</span>
+              </div>
+              <span class="task-pill">Active</span>
+            </div>
+            <div class="task-item">
+              <div class="task-meta">
+                <strong>Alpha signals</strong>
+                <span>Blend momentum + volume anomalies for entries.</span>
+              </div>
+              <span class="task-pill">Queued</span>
+            </div>
+          </div>
+        </section>
+
         <section class="card">
           <h3>Trades</h3>
           <div class="scroll" id="trades"></div>
