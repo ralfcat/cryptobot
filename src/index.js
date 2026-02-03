@@ -20,7 +20,15 @@ import { appendRugPullSample, computeRugPullRisk } from "./rugpull.js";
 import { loadState, saveState } from "./state.js";
 import { sleep, nowMs, pctChange } from "./utils.js";
 import { startServer } from "./server.js";
-import { TOKEN_PROGRAM_ID } from "@solana/spl-token";
+import { logStructured } from "./logger.js";
+import {
+  initMetrics,
+  recordError,
+  recordTrade,
+  setBalances,
+  setOpenPositions,
+  getMetricsRegister,
+} from "./metrics.js";
 
 const SOL_MINT = "So11111111111111111111111111111111111111112";
 const USDC_MINT = "EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v";
@@ -46,7 +54,8 @@ function parseMode(value) {
   return VALID_MODES.has(mode) ? mode : null;
 }
 
-let currentMode = normalizeMode(config.mode);
+const initialMode = config.simulatorMode ? "simulator" : config.mode;
+let currentMode = normalizeMode(initialMode);
 
 const ui = {
   status: "starting",
@@ -54,6 +63,7 @@ const ui = {
   mode: currentMode,
   balances: { sol: 0, solUsd: 0, totalUsd: 0 },
   position: null,
+  positions: [],
   rules: {
     stopLossPct: config.stopLossPct,
     takeProfitPct: config.takeProfitPct,
@@ -75,6 +85,9 @@ let holdersCheckUnavailable = false;
 let manualExitRequested = false;
 let manualExitRequestedAt = 0;
 let birdeyeBlockedUntilMs = 0;
+const appendQueue = [];
+let appendFlushTimer = null;
+let appendFlushing = false;
 
 function isSimulatorMode() {
   return currentMode === "simulator";
@@ -89,7 +102,7 @@ function broadcastUi(patch = {}) {
 }
 
 function pushLog(level, msg) {
-  const prefix = config.simulatorMode ? "[SIM] " : "";
+  const prefix = isSimulatorMode() ? "[SIM] " : "";
   const text = msg.startsWith(prefix) ? msg : `${prefix}${msg}`;
   const entry = { t: nowMs(), level, msg: text };
   ui.logs.push(entry);
@@ -97,6 +110,7 @@ function pushLog(level, msg) {
   ui.lastAction = text;
   if (level === "error") console.error(text);
   else console.log(text);
+  logStructured({ level, event: "log", message: text });
   broadcastUi();
 }
 
@@ -104,14 +118,16 @@ function pushTrade(entry) {
   const record = { t: nowMs(), ...entry };
   ui.trades.push(record);
   if (ui.trades.length > 200) ui.trades.shift();
-  fs.appendFileSync(tradesPath, `${JSON.stringify(record)}\n`);
+  enqueueAppend(tradesPath, `${JSON.stringify(record)}\n`);
   appendTradeCsv(record);
+  recordTrade(record.side);
+  logStructured({ level: "info", event: "trade", message: record.reason || "trade", trade: record });
   broadcastUi();
 }
 
 function pushTrainingEvent(entry) {
   const record = { t: nowMs(), ...entry };
-  fs.appendFileSync(trainingEventsPath, `${JSON.stringify(record)}\n`);
+  enqueueAppend(trainingEventsPath, `${JSON.stringify(record)}\n`);
 }
 
 function buildDecisionMetadata(reason, cooldown) {
@@ -207,7 +223,7 @@ function appendTradeCsv(record) {
   const headers = ["timestamp", "side", "mint", "pnlPct", "profitUsd", "sig", "reason"];
   const exists = fs.existsSync(tradesCsvPath);
   if (!exists || fs.statSync(tradesCsvPath).size === 0) {
-    fs.appendFileSync(tradesCsvPath, `${headers.join(",")}\n`);
+    enqueueAppend(tradesCsvPath, `${headers.join(",")}\n`);
   }
   const row = [
     new Date(record.t).toISOString(),
@@ -218,7 +234,38 @@ function appendTradeCsv(record) {
     record.sig ?? "",
     record.reason ?? "",
   ].map(csvEscape);
-  fs.appendFileSync(tradesCsvPath, `${row.join(",")}\n`);
+  enqueueAppend(tradesCsvPath, `${row.join(",")}\n`);
+}
+
+function enqueueAppend(filePath, payload) {
+  appendQueue.push({ filePath, payload });
+  scheduleAppendFlush();
+}
+
+function scheduleAppendFlush() {
+  if (appendFlushTimer) return;
+  appendFlushTimer = setTimeout(() => {
+    appendFlushTimer = null;
+    void flushAppendQueue();
+  }, 25);
+}
+
+async function flushAppendQueue() {
+  if (appendFlushing) return;
+  appendFlushing = true;
+  try {
+    while (appendQueue.length) {
+      const { filePath, payload } = appendQueue.shift();
+      try {
+        await fs.promises.appendFile(filePath, payload);
+      } catch (err) {
+        console.error(`Failed to append to ${filePath}: ${err?.message || String(err)}`);
+      }
+    }
+  } finally {
+    appendFlushing = false;
+    if (appendQueue.length) scheduleAppendFlush();
+  }
 }
 
 async function logSendTransactionError(err, connection) {
@@ -336,6 +383,7 @@ async function pickCandidateBirdeye(connection, tradeLamports) {
   const scanList =
     config.candidateLimit && config.candidateLimit > 0 ? list.slice(0, config.candidateLimit) : list;
   const candidates = [];
+  const relaxedCandidates = [];
   const volatilityOnlyCandidates = [];
   const relaxedMomentumMinPctShort = 0;
   const relaxedMomentumMinPctLong = 0;
@@ -423,7 +471,6 @@ async function pickCandidateBirdeye(connection, tradeLamports) {
       continue;
     }
 
-    let holdersPct = null;
     if (config.maxTop10Pct > 0 && config.maxTop10Pct < 100 && !holdersCheckUnavailable) {
       const holders = await getTopHoldersPct(connection, mintPub, 10);
       if (holders.error) {
@@ -720,7 +767,6 @@ async function pickCandidateDex(connection, tradeLamports) {
       continue;
     }
 
-    let holdersPct = null;
     if (config.maxTop10Pct > 0 && config.maxTop10Pct < 100 && !holdersCheckUnavailable) {
       const holders = await getTopHoldersPct(connection, mintPub, 10);
       if (holders.error) {
@@ -941,109 +987,47 @@ async function shouldExtendHold(position) {
   return signal.trend;
 }
 
-async function getWalletTokenBalances(connection, owner) {
-  const resp = await connection.getParsedTokenAccountsByOwner(owner, { programId: TOKEN_PROGRAM_ID }, "confirmed");
-  return resp.value
-    .map((account) => {
-      const info = account.account.data.parsed.info;
-      const amount = info.tokenAmount;
-      return {
-        mint: info.mint,
-        amountRaw: BigInt(amount.amount || "0"),
-        amountUi: amount.uiAmount || 0,
-        decimals: amount.decimals ?? 0,
-      };
-    })
-    .filter((token) => token.amountRaw > 0n);
-}
-
-async function reconcilePositionWithChain(connection, state, keypair) {
-  if (config.simulatorMode) return;
-  const active = state.position;
-  const owner = keypair.publicKey;
-
-  if (active) {
-    const balanceRaw = await getTokenBalanceRaw(connection, owner, new PublicKey(active.mint));
-    if (balanceRaw <= 0n) {
-      pushLog(
-        "warn",
-        `State position mismatch: ${active.mint} missing on-chain balance. Resetting stored position.`
-      );
-      state.position = null;
-      saveState(state);
-      return;
-    }
-
-    const decimals = Number.isFinite(active.tokenDecimals) ? active.tokenDecimals : 0;
-    const amountUi = Number(balanceRaw) / 10 ** decimals;
-    if (Math.abs((active.tokenAmount || 0) - amountUi) > 0) {
-      pushLog(
-        "warn",
-        `State position mismatch: updating ${active.mint} amount to ${amountUi.toFixed(6)} from on-chain balance.`
-      );
-      active.tokenAmount = amountUi;
-      active.tokenDecimals = decimals;
-      state.position = active;
-      saveState(state);
-    }
-    return;
-  }
-
-  const onChainBalances = await getWalletTokenBalances(connection, owner);
-  if (!onChainBalances.length) return;
-
-  const sorted = [...onChainBalances].sort((a, b) => Number(b.amountRaw - a.amountRaw));
-  const candidate = sorted[0];
-  pushLog(
-    "warn",
-    `On-chain token balance detected for ${candidate.mint} while state.position is empty. Rebuilding position.`
-  );
-
-  const rebuilt = {
-    signature: "reconciled-startup",
-    mint: candidate.mint,
-    tokenAmount: candidate.amountUi,
-    tokenDecimals: candidate.decimals,
-    entryTimeMs: nowMs(),
-    entrySol: 0,
-    reconciled: true,
-    requiresManualExit: currentMode === "sharp",
+function buildPositionSummary(position, { heldMinutes, pnlPct, estUsd, estSol } = {}) {
+  return {
+    id: position.id,
+    mint: position.mint,
+    heldMinutes,
+    pnlPct,
+    estUsd,
+    estSol,
   };
-
-  try {
-    const valuation = await estimateTokenValueSol(rebuilt);
-    rebuilt.entrySol = valuation.outSol;
-  } catch (err) {
-    pushLog("warn", `Unable to value reconciled position for ${candidate.mint}: ${err?.message || err}`);
-  }
-
-  if (rebuilt.requiresManualExit) {
-    pushLog(
-      "warn",
-      "Sharp mode safeguard: auto-sell is disabled for reconciled positions until manual confirmation."
-    );
-  }
-
-  state.position = rebuilt;
-  saveState(state);
 }
 
 async function run() {
   requireConfig();
+  initMetrics();
   const connection = createConnection(config.rpcUrl);
   const state = loadState();
-  const isSimulator = config.simulatorMode;
-  const keypair = isSimulator ? null : loadKeypair();
+  let keypair = null;
 
-  const getActivePosition = () => (isSimulator ? state.simPosition : state.position);
-  const setActivePosition = (value) => {
-    if (isSimulator) state.simPosition = value;
-    else state.position = value;
+  const getActivePositions = () => (isSimulator ? state.simPositions : state.positions);
+  const setActivePositions = (value) => {
+    if (isSimulator) state.simPositions = value;
+    else state.positions = value;
   };
 
   const ensureNumber = (value, fallback = 0) => (Number.isFinite(value) ? value : fallback);
   state.simBalanceSol = ensureNumber(state.simBalanceSol, 0);
   state.simBalanceUsd = ensureNumber(state.simBalanceUsd, 0);
+  const applySimExit = (outSol, solUsdNow) => {
+    if (!isSimulator) return;
+    const updatedSol = ensureNumber(state.simBalanceSol, 0) + ensureNumber(outSol, 0);
+    state.simBalanceSol = Math.max(0, updatedSol);
+    state.simBalanceUsd = state.simBalanceSol * ensureNumber(solUsdNow, 0);
+  };
+
+  const normalizedPositions = getActivePositions().map((pos, idx) => ({
+    ...pos,
+    id: pos.id || `pos-${nowMs()}-${idx}`,
+  }));
+  setActivePositions(normalizedPositions);
+  state.position = normalizedPositions[0] ?? null;
+  state.simPosition = normalizedPositions[0] ?? null;
 
   const resolveSimulatorStartBalance = async () => {
     if (config.simulatorStartSol > 0) return config.simulatorStartSol;
@@ -1054,34 +1038,36 @@ async function run() {
     return 0;
   };
 
-  if (isSimulator && state.simBalanceSol <= 0) {
+  const ensureSimulatorBalance = async () => {
+    if (!isSimulatorMode() || state.simBalanceSol > 0) return;
     const startSol = await resolveSimulatorStartBalance();
-    if (startSol > 0) {
-      state.simBalanceSol = startSol;
-      const solUsd = await getSolUsdPriceCached();
-      state.simBalanceUsd = state.simBalanceSol * solUsd;
-      saveState(state);
-      pushLog("info", `Simulator balance initialized to ${state.simBalanceSol.toFixed(4)} SOL.`);
-    }
-  }
+    if (startSol <= 0) return;
+    state.simBalanceSol = startSol;
+    const solUsd = await getSolUsdPriceCached();
+    state.simBalanceUsd = state.simBalanceSol * solUsd;
+    saveState(state);
+    pushLog("info", `Simulator balance initialized to ${state.simBalanceSol.toFixed(4)} SOL.`);
+  };
+
+  await ensureSimulatorBalance();
 
   if (!isSimulator && keypair) {
     await reconcilePositionWithChain(connection, state, keypair);
   }
 
   const requestManualExit = () => {
-    if (!getActivePosition()) return { ok: false, error: "no_position" };
+    if (!getActivePositions().length) return { ok: false, error: "no_position" };
     if (manualExitRequested) {
-      return { ok: true, requested: true, mint: getActivePosition().mint, alreadyQueued: true };
+      return { ok: true, requested: true, alreadyQueued: true };
     }
     manualExitRequested = true;
     manualExitRequestedAt = nowMs();
-    pushLog("warn", "Manual sell requested. Exiting on next loop.");
-    return { ok: true, requested: true, mint: getActivePosition().mint, queuedAt: manualExitRequestedAt };
+    pushLog("warn", "Manual sell requested. Exiting positions on next loop.");
+    return { ok: true, requested: true, queuedAt: manualExitRequestedAt };
   };
 
   const requestResetCooldown = () => {
-    if (getActivePosition()) return { ok: false, error: "position_open" };
+    if (getActivePositions().length) return { ok: false, error: "position_open" };
     const current = getCooldown(state);
     if (current.remainingSec <= 0) {
       return { ok: true, reset: false, remainingSec: 0 };
@@ -1106,352 +1092,412 @@ async function run() {
     return { ok: true, mode: currentMode, changed: true };
   };
 
+  const buildStats = () => ({
+    status: ui.status,
+    mode: ui.mode,
+    balances: ui.balances,
+    positions: ui.positions,
+    lastAction: ui.lastAction,
+    trades: ui.trades.slice(-50),
+  });
+
   uiServer = startServer({
     port: config.port,
     host: config.host,
     onSellNow: requestManualExit,
     onResetCooldown: requestResetCooldown,
     onSetMode: requestSetMode,
+    onGetStats: buildStats,
+    metricsEnabled: config.metricsEnabled,
+    metricsPath: config.metricsPath,
+    metricsRegister: getMetricsRegister(),
+    statsApiKey: config.statsApiKey,
   });
   pushLog("info", `UI available at http://localhost:${config.port}`);
 
   while (true) {
     try {
       const now = nowMs();
+      await ensureSimulatorBalance();
+      const simulatorActive = isSimulatorMode();
       const cooldown = getCooldown(state);
       const shouldUpdateUi = now - lastUiUpdateMs >= config.uiRefreshSeconds * 1000;
+      const positions = getActivePositions();
       const shouldScan =
-        !getActivePosition() &&
+        positions.length < config.maxOpenPositions &&
         cooldown.remainingSec <= 0 &&
         now - lastScanMs >= config.scanIntervalSeconds * 1000;
 
       let solBalance = null;
       let solUsd = null;
-      if (shouldUpdateUi || shouldScan || getActivePosition()) {
+      if (shouldUpdateUi || shouldScan || positions.length) {
         solBalance = isSimulator ? state.simBalanceSol : await getSolBalance(connection, keypair.publicKey);
       }
-      if (shouldUpdateUi || getActivePosition() || shouldScan) {
+      if (shouldUpdateUi || positions.length || shouldScan) {
         solUsd = await getSolUsdPriceCached();
       }
+      setOpenPositions(positions.length);
 
-      if (getActivePosition()) {
-        const position = getActivePosition();
-        const heldMinutes = (now - position.entryTimeMs) / 60000;
-        const timeStopHit = heldMinutes >= config.exitHardMinutes;
-        const softStopHit = heldMinutes >= config.exitSoftMinutes;
-        const autoExitAllowed = !position.requiresManualExit || manualExitRequested || isSimulator;
+      const closePosition = async ({
+        position,
+        reason,
+        pnlPct,
+        profitUsd,
+        heldMinutes,
+        solUsdNow,
+      }) => {
+        const { sig, outSol } = await exitPosition(connection, keypair, position);
+        pushLog("info", `Exit tx: ${sig}`);
+        pushTrade({ side: "sell", mint: position.mint, pnlPct, profitUsd, sig, reason, positionId: position.id });
+        pushTrainingEvent(
+          buildTrainingEvent({
+            event: "exit",
+            side: "sell",
+            mint: position.mint,
+            sig,
+            pnlPct,
+            profitUsd,
+            heldMinutes,
+            decision: buildDecisionMetadata(reason, getCooldown(state)),
+            entrySnapshot: position.entrySnapshot ?? null,
+          })
+        );
+        const remaining = getActivePositions().filter((item) => item.id !== position.id);
+        setActivePositions(remaining);
+        if (isSimulator) {
+          state.simBalanceSol += outSol;
+          state.simBalanceUsd = state.simBalanceSol * (solUsdNow || 0);
+        }
+        state.position = remaining[0] ?? null;
+        state.simPosition = remaining[0] ?? null;
+        state.lastExitTimeMs = nowMs();
+        saveState(state);
+      };
 
-        let outSol = null;
-        let pnlPct = null;
-        let profitUsd = null;
-        let totalValueUsd = null;
+      if (positions.length) {
+        const positionSnapshots = [];
+        const uiPositions = [];
+        let positionsEstSol = 0;
 
-        if (manualExitRequested) {
-          pushLog("warn", "Manual sell triggered. Exiting now.");
+        for (const position of positions) {
+          const heldMinutes = (now - position.entryTimeMs) / 60000;
           const valuation = await estimateTokenValueSol(position);
-          outSol = valuation.outSol;
-          pnlPct = pctChange(position.entrySol, outSol);
-          const solUsdNow = solUsd ?? (await getSolUsdPriceCached());
-          profitUsd = (outSol - position.entrySol) * solUsdNow;
-          const exitResult = await exitPosition(connection, keypair, position, { simulate: isSimulator });
-          manualExitRequested = false;
-          pushLog("info", `Exit tx: ${sig}`);
-          pushTrade({ side: "sell", mint: position.mint, pnlPct, profitUsd, sig, reason: "manual" });
-          pushTrainingEvent(
-            buildTrainingEvent({
-              event: "exit",
-              side: "sell",
-              mint: position.mint,
-              sig,
-              pnlPct,
-              profitUsd,
-              heldMinutes,
-              decision: buildDecisionMetadata("manual", getCooldown(state)),
-              entrySnapshot: position.entrySnapshot ?? null,
-            })
-          );
-          state.position = null;
-          state.lastExitTimeMs = nowMs();
-          if (isSimulator) state.simBalanceUsd = state.simBalanceSol * (solUsdNow || 0);
-          saveState(state);
-          continue;
+          const outSol = valuation.outSol;
+          const pnlPct = pctChange(position.entrySol, outSol);
+          const profitUsd = solUsd !== null ? (outSol - position.entrySol) * solUsd : null;
+          positionsEstSol += outSol;
+          positionSnapshots.push({ position, heldMinutes, outSol, pnlPct, profitUsd });
+          if (shouldUpdateUi) {
+            uiPositions.push(
+              buildPositionSummary(position, {
+                heldMinutes,
+                pnlPct,
+                estUsd: solUsd ? outSol * solUsd : null,
+                estSol: outSol,
+              })
+            );
+          }
         }
 
-        if (!autoExitAllowed && !position.manualExitWarnedAt) {
-          pushLog("warn", "Auto-sell blocked in sharp mode. Use manual sell to exit this position.");
-          position.manualExitWarnedAt = nowMs();
-          state.position = position;
-          saveState(state);
-        }
-
+        const totalValueUsd = solUsd !== null ? (solBalance + positionsEstSol) * solUsd : null;
         if (shouldUpdateUi) {
-          const valuation = await estimateTokenValueSol(position);
-          outSol = valuation.outSol;
-          pnlPct = pctChange(position.entrySol, outSol);
-          profitUsd = (outSol - position.entrySol) * solUsd;
-          totalValueUsd = (solBalance + outSol) * solUsd;
-
           broadcastUi({
             status: "holding",
-            balances: { sol: solBalance, solUsd, totalUsd: totalValueUsd },
-            position: {
-              mint: position.mint,
-              heldMinutes,
-              pnlPct,
-              estUsd: outSol * solUsd,
-              estSol: outSol,
-            },
+            balances: { sol: solBalance, solUsd, totalUsd: totalValueUsd ?? 0 },
+            position: uiPositions[0] ?? null,
+            positions: uiPositions,
             cooldown,
           });
           lastUiUpdateMs = now;
         }
+        setBalances({ sol: solBalance, solUsd, totalUsd: totalValueUsd ?? 0 });
 
-        if (autoExitAllowed && totalValueUsd !== null && totalValueUsd <= config.accountStopUsd) {
-          pushLog("warn", "Account stop triggered. Exiting.");
-          const sig = await exitPosition(connection, keypair, position);
-          pushLog("info", `Exit tx: ${sig}`);
-          pushTrade({ side: "sell", mint: position.mint, pnlPct, profitUsd, sig, reason: "account_stop" });
-          pushTrainingEvent(
-            buildTrainingEvent({
-              event: "exit",
-              side: "sell",
-              mint: position.mint,
-              sig,
+        const accountStopHit =
+          totalValueUsd !== null && config.accountStopUsd > 0 && totalValueUsd <= config.accountStopUsd;
+
+        for (const snapshot of positionSnapshots) {
+          const { position, heldMinutes, pnlPct, profitUsd } = snapshot;
+          const timeStopHit = heldMinutes >= config.exitHardMinutes;
+          const softStopHit = heldMinutes >= config.exitSoftMinutes;
+          const solUsdNow = solUsd ?? (await getSolUsdPriceCached());
+
+          if (manualExitRequested) {
+            pushLog("warn", "Manual sell triggered. Exiting now.");
+            await closePosition({
+              position,
+              reason: "manual",
               pnlPct,
               profitUsd,
               heldMinutes,
-              decision: buildDecisionMetadata("account_stop", getCooldown(state)),
-              entrySnapshot: position.entrySnapshot ?? null,
-            })
-          );
-          state.position = null;
-          state.lastExitTimeMs = nowMs();
-          saveState(state);
-          continue;
-        }
+              solUsdNow,
+            });
+            continue;
+          }
 
-        if (autoExitAllowed && pnlPct !== null && pnlPct <= -config.stopLossPct * 100) {
-          pushLog("warn", "Stop loss triggered. Exiting.");
-          const sig = await exitPosition(connection, keypair, position);
-          pushLog("info", `Exit tx: ${sig}`);
-          pushTrade({ side: "sell", mint: position.mint, pnlPct, profitUsd, sig, reason: "stop_loss" });
-          pushTrainingEvent(
-            buildTrainingEvent({
-              event: "exit",
-              side: "sell",
-              mint: position.mint,
-              sig,
+          if (accountStopHit) {
+            pushLog("warn", "Account stop triggered. Exiting.");
+            await closePosition({
+              position,
+              reason: "account_stop",
               pnlPct,
               profitUsd,
               heldMinutes,
-              decision: buildDecisionMetadata("stop_loss", getCooldown(state)),
-              entrySnapshot: position.entrySnapshot ?? null,
-            })
-          );
-          state.position = null;
-          state.lastExitTimeMs = nowMs();
-          saveState(state);
-          continue;
-        }
+              solUsdNow,
+            });
+            continue;
+          }
 
-        if (autoExitAllowed && pnlPct !== null && profitUsd !== null && shouldTakeProfit(pnlPct, profitUsd)) {
-          pushLog("info", "Take profit triggered. Exiting.");
-          const sig = await exitPosition(connection, keypair, position);
-          pushLog("info", `Exit tx: ${sig}`);
-          pushTrade({ side: "sell", mint: position.mint, pnlPct, profitUsd, sig, reason: "take_profit" });
-          pushTrainingEvent(
-            buildTrainingEvent({
-              event: "exit",
-              side: "sell",
-              mint: position.mint,
-              sig,
+          if (pnlPct !== null && pnlPct <= -config.stopLossPct * 100) {
+            pushLog("warn", "Stop loss triggered. Exiting.");
+            await closePosition({
+              position,
+              reason: "stop_loss",
               pnlPct,
               profitUsd,
               heldMinutes,
-              decision: buildDecisionMetadata("take_profit", getCooldown(state)),
-              entrySnapshot: position.entrySnapshot ?? null,
-            })
-          );
-          state.position = null;
-          state.lastExitTimeMs = nowMs();
-          saveState(state);
-          continue;
-        }
+              solUsdNow,
+            });
+            continue;
+          }
 
-        if (autoExitAllowed && timeStopHit) {
-          pushLog("info", "Hard time stop. Exiting.");
-          const sig = await exitPosition(connection, keypair, position);
-          pushLog("info", `Exit tx: ${sig}`);
-          pushTrade({ side: "sell", mint: position.mint, pnlPct, profitUsd, sig, reason: "hard_time" });
-          pushTrainingEvent(
-            buildTrainingEvent({
-              event: "exit",
-              side: "sell",
-              mint: position.mint,
-              sig,
+          if (pnlPct !== null && profitUsd !== null && shouldTakeProfit(pnlPct, profitUsd)) {
+            pushLog("info", "Take profit triggered. Exiting.");
+            await closePosition({
+              position,
+              reason: "take_profit",
               pnlPct,
               profitUsd,
               heldMinutes,
-              decision: buildDecisionMetadata("hard_time", getCooldown(state)),
-              entrySnapshot: position.entrySnapshot ?? null,
-            })
-          );
-          state.position = null;
-          state.lastExitTimeMs = nowMs();
-          saveState(state);
-          continue;
-        }
+              solUsdNow,
+            });
+            continue;
+          }
 
-        if (autoExitAllowed && softStopHit && shouldUpdateUi) {
-          const canExtend = pnlPct !== null && pnlPct >= config.minProfitToExtendPct && (await shouldExtendHold(position));
-          if (!canExtend) {
-            pushLog("info", "Soft time stop. Exiting.");
-            const sig = await exitPosition(connection, keypair, position);
-            pushLog("info", `Exit tx: ${sig}`);
-            pushTrade({ side: "sell", mint: position.mint, pnlPct, profitUsd, sig, reason: "soft_time" });
-            pushTrainingEvent(
-              buildTrainingEvent({
-                event: "exit",
-                side: "sell",
-                mint: position.mint,
-                sig,
+          if (timeStopHit) {
+            pushLog("info", "Hard time stop. Exiting.");
+            await closePosition({
+              position,
+              reason: "hard_time",
+              pnlPct,
+              profitUsd,
+              heldMinutes,
+              solUsdNow,
+            });
+            continue;
+          }
+
+          if (softStopHit && shouldUpdateUi) {
+            const canExtend =
+              pnlPct !== null &&
+              pnlPct >= config.minProfitToExtendPct &&
+              (await shouldExtendHold(position));
+            if (!canExtend) {
+              pushLog("info", "Soft time stop. Exiting.");
+              await closePosition({
+                position,
+                reason: "soft_time",
                 pnlPct,
                 profitUsd,
                 heldMinutes,
-                decision: buildDecisionMetadata("soft_time", getCooldown(state)),
-                entrySnapshot: position.entrySnapshot ?? null,
-              })
+                solUsdNow,
+              });
+              continue;
+            }
+          }
+
+          if (shouldUpdateUi && pnlPct !== null && totalValueUsd !== null) {
+            pushLog(
+              "info",
+              `Holding ${position.mint} | pnl ${pnlPct.toFixed(2)}% | held ${heldMinutes.toFixed(
+                1
+              )}m | est $${totalValueUsd.toFixed(2)}`
             );
-            state.position = null;
-            state.lastExitTimeMs = nowMs();
-            saveState(state);
-            continue;
           }
         }
 
-        if (shouldUpdateUi && pnlPct !== null && totalValueUsd !== null) {
-          pushLog(
-            "info",
-            `Holding ${position.mint} | pnl ${pnlPct.toFixed(2)}% | held ${heldMinutes.toFixed(1)}m | est $${totalValueUsd.toFixed(2)}`
-          );
-        }
-      } else {
-        if (birdeyeBlockedUntilMs && now < birdeyeBlockedUntilMs && config.dataProvider === "birdeye") {
-          const remainingSec = Math.ceil((birdeyeBlockedUntilMs - now) / 1000);
-          broadcastUi({
-            status: "birdeye-cooldown",
-            balances: {
+        manualExitRequested = false;
+      }
+
+      if (!shouldScan) {
+        if (!positions.length) {
+          if (birdeyeBlockedUntilMs && now < birdeyeBlockedUntilMs && config.dataProvider === "birdeye") {
+            const remainingSec = Math.ceil((birdeyeBlockedUntilMs - now) / 1000);
+            broadcastUi({
+              status: "birdeye-cooldown",
+              balances: {
+                sol: solBalance ?? 0,
+                solUsd: solUsd ?? 0,
+                totalUsd: (solBalance ?? 0) * (solUsd ?? 0),
+              },
+              position: null,
+              positions: [],
+              cooldown,
+            });
+            setBalances({
               sol: solBalance ?? 0,
               solUsd: solUsd ?? 0,
               totalUsd: (solBalance ?? 0) * (solUsd ?? 0),
-            },
-            position: null,
-            cooldown,
-          });
-          if (shouldUpdateUi) {
-            pushLog("warn", `Birdeye quota exceeded. Pausing scans for ${remainingSec}s`);
-            lastUiUpdateMs = now;
+            });
+            if (shouldUpdateUi) {
+              pushLog("warn", `Birdeye quota exceeded. Pausing scans for ${remainingSec}s`);
+              lastUiUpdateMs = now;
+            }
+            await sleep(LOOP_MS);
+            continue;
           }
-          await sleep(LOOP_MS);
-          continue;
-        }
 
-        if (cooldown.remainingSec > 0) {
-          broadcastUi({
-            status: "cooldown",
-            balances: { sol: solBalance ?? 0, solUsd: solUsd ?? 0, totalUsd: (solBalance ?? 0) * (solUsd ?? 0) },
-            position: null,
-            cooldown,
-          });
-          if (shouldUpdateUi) {
-            pushLog("info", `Cooldown active. Next entry in ${cooldown.remainingSec}s`);
-            lastUiUpdateMs = now;
+          if (cooldown.remainingSec > 0) {
+            broadcastUi({
+              status: "cooldown",
+              balances: { sol: solBalance ?? 0, solUsd: solUsd ?? 0, totalUsd: (solBalance ?? 0) * (solUsd ?? 0) },
+              position: null,
+              positions: [],
+              cooldown,
+            });
+            setBalances({
+              sol: solBalance ?? 0,
+              solUsd: solUsd ?? 0,
+              totalUsd: (solBalance ?? 0) * (solUsd ?? 0),
+            });
+            if (shouldUpdateUi) {
+              pushLog("info", `Cooldown active. Next entry in ${cooldown.remainingSec}s`);
+              lastUiUpdateMs = now;
+            }
+            await sleep(LOOP_MS);
+            continue;
           }
-          await sleep(LOOP_MS);
-          continue;
-        }
 
-        if (!shouldScan) {
           if (shouldUpdateUi && solBalance !== null && solUsd !== null) {
             const totalUsd = solBalance * solUsd;
-            broadcastUi({ status: "waiting", balances: { sol: solBalance, solUsd, totalUsd }, position: null, cooldown });
+            broadcastUi({
+              status: "waiting",
+              balances: { sol: solBalance, solUsd, totalUsd },
+              position: null,
+              positions: [],
+              cooldown,
+            });
+            setBalances({ sol: solBalance, solUsd, totalUsd });
             lastUiUpdateMs = now;
           }
-          await sleep(LOOP_MS);
-          continue;
         }
+        await sleep(LOOP_MS);
+        continue;
+      }
 
-        const totalUsd = solBalance * solUsd;
-        const feeBufferSol = isSimulator ? config.simulatorFeeBufferSol : config.feeBufferSol;
-        const tradeSol = Math.max(0, solBalance - feeBufferSol);
-        if (tradeSol <= 0) {
-          pushLog("warn", "Not enough SOL after fee buffer.");
-          await sleep(LOOP_MS);
-          continue;
+      if (birdeyeBlockedUntilMs && now < birdeyeBlockedUntilMs && config.dataProvider === "birdeye") {
+        if (shouldUpdateUi) {
+          const remainingSec = Math.ceil((birdeyeBlockedUntilMs - now) / 1000);
+          pushLog("warn", `Birdeye quota exceeded. Pausing scans for ${remainingSec}s`);
         }
+        await sleep(LOOP_MS);
+        continue;
+      }
 
-        const tradeLamports = Math.floor(tradeSol * LAMPORTS_PER_SOL);
-        broadcastUi({ status: "scanning", balances: { sol: solBalance, solUsd, totalUsd }, position: null, cooldown });
-        pushLog("info", `Scanning candidates. SOL $${totalUsd.toFixed(2)} tradeSol ${tradeSol.toFixed(4)}`);
+      const totalUsd = solBalance * solUsd;
+      const feeBufferSol = isSimulator ? config.simulatorFeeBufferSol : config.feeBufferSol;
+      const availableSol = Math.max(0, solBalance - feeBufferSol);
+      if (availableSol <= 0) {
+        pushLog("warn", "Not enough SOL after fee buffer.");
+        await sleep(LOOP_MS);
+        continue;
+      }
 
-        lastScanMs = now;
-        const candidate = await pickCandidate(connection, tradeLamports);
-        if (!candidate) {
-          pushLog("info", "No candidates found.");
-        } else {
-          const momentumNote = candidate.momentum
-            ? ` | momentum ${candidate.momentum.pctShort.toFixed(2)}%/${candidate.momentum.pctLong.toFixed(2)}%`
-            : "";
-          const volatilityNote = candidate.volatility
-            ? ` | vol ${candidate.volatility.rangePct.toFixed(2)}%`
-            : "";
-          pushLog(
-            "info",
-            `Entering ${candidate.name || candidate.address} impact ${candidate.priceImpactPct?.toFixed?.(2) ?? "?"}%${volatilityNote}${momentumNote}`
-          );
-          const entrySnapshot = buildEntrySnapshot(candidate);
-          const position = await enterPosition(connection, keypair, tradeLamports, candidate);
-          position.entrySnapshot = entrySnapshot;
-          state.position = position;
-          state.lastTradeTimeMs = nowMs();
-          if (isSimulator) {
-            state.simBalanceSol = Math.max(0, state.simBalanceSol - position.entrySol);
-            state.simBalanceUsd = state.simBalanceSol * solUsd;
-          }
-          saveState(state);
-          const entryCooldown = getCooldown(state);
-          pushTrade({
+      const allocationPct = Math.min(1, Math.max(0, (config.tradeAllocationPct || 0) / 100));
+      let tradeSol = availableSol * (allocationPct || 1);
+      if (config.maxPositionSol > 0) {
+        tradeSol = Math.min(tradeSol, config.maxPositionSol);
+      }
+      if (config.minRemainingSol > 0) {
+        tradeSol = Math.min(tradeSol, Math.max(0, availableSol - config.minRemainingSol));
+      }
+      if (tradeSol <= 0) {
+        pushLog("warn", "Trade allocation too small after enforcing reserves.");
+        await sleep(LOOP_MS);
+        continue;
+      }
+
+      const tradeLamports = Math.floor(tradeSol * LAMPORTS_PER_SOL);
+      if (!positions.length) {
+        broadcastUi({
+          status: "scanning",
+          balances: { sol: solBalance, solUsd, totalUsd },
+          position: null,
+          positions: [],
+          cooldown,
+        });
+        setBalances({ sol: solBalance, solUsd, totalUsd });
+      }
+      pushLog(
+        "info",
+        `Scanning candidates. SOL $${totalUsd.toFixed(2)} tradeSol ${tradeSol.toFixed(4)}`
+      );
+
+      lastScanMs = now;
+      const candidate = await pickCandidate(connection, tradeLamports);
+      if (!candidate) {
+        pushLog("info", "No candidates found.");
+      } else if (positions.some((item) => item.mint === candidate.address)) {
+        pushLog("info", "Candidate already held. Skipping entry.");
+      } else {
+        const momentumNote = candidate.momentum
+          ? ` | momentum ${candidate.momentum.pctShort.toFixed(2)}%/${candidate.momentum.pctLong.toFixed(2)}%`
+          : "";
+        const volatilityNote = candidate.volatility
+          ? ` | vol ${candidate.volatility.rangePct.toFixed(2)}%`
+          : "";
+        pushLog(
+          "info",
+          `Entering ${candidate.name || candidate.address} impact ${candidate.priceImpactPct?.toFixed?.(2) ?? "?"}%${volatilityNote}${momentumNote}`
+        );
+        const entrySnapshot = buildEntrySnapshot(candidate);
+        const position = await enterPosition(connection, keypair, tradeLamports, candidate);
+        position.id = `pos-${nowMs()}-${Math.random().toString(36).slice(2, 8)}`;
+        position.entrySnapshot = entrySnapshot;
+        const nextPositions = [...getActivePositions(), position];
+        setActivePositions(nextPositions);
+        state.position = nextPositions[0] ?? null;
+        state.simPosition = nextPositions[0] ?? null;
+        state.lastTradeTimeMs = nowMs();
+        if (isSimulator) {
+          state.simBalanceSol = Math.max(0, state.simBalanceSol - position.entrySol);
+          state.simBalanceUsd = state.simBalanceSol * solUsd;
+        }
+        saveState(state);
+        const entryCooldown = getCooldown(state);
+        pushTrade({
+          side: "buy",
+          mint: position.mint,
+          pnlPct: 0,
+          profitUsd: 0,
+          sig: position.signature,
+          reason: isSimulatorMode() ? "entry_simulated" : "entry",
+          positionId: position.id,
+        });
+        pushTrainingEvent(
+          buildTrainingEvent({
+            event: "entry",
             side: "buy",
             mint: position.mint,
+            sig: position.signature,
             pnlPct: 0,
             profitUsd: 0,
-            sig: position.signature,
-            reason: isSimulatorMode() ? "entry_simulated" : "entry",
-          });
-          pushTrainingEvent(
-            buildTrainingEvent({
-              event: "entry",
-              side: "buy",
-              mint: position.mint,
-              sig: position.signature,
-              pnlPct: 0,
-              profitUsd: 0,
-              heldMinutes: 0,
-              decision: buildDecisionMetadata("entry", entryCooldown),
-              entrySnapshot,
-            })
-          );
-          pushLog("info", `Entry tx: ${position.signature}`);
-        }
+            heldMinutes: 0,
+            decision: buildDecisionMetadata("entry", entryCooldown),
+            entrySnapshot,
+          })
+        );
+        pushLog("info", `Entry tx: ${position.signature}`);
       }
     } catch (err) {
       if (isBirdeyeQuotaError(err)) {
         const blockMinutes = Math.max(1, config.birdeyeBlockMinutes || 10);
         birdeyeBlockedUntilMs = nowMs() + blockMinutes * 60 * 1000;
         pushLog("warn", `Birdeye quota exceeded. Pausing scans for ${blockMinutes} minutes.`);
+        recordError("birdeye_quota");
       } else {
         await logSendTransactionError(err, connection);
         pushLog("error", err?.message || String(err));
+        recordError("runtime");
       }
     }
 

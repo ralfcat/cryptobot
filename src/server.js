@@ -8,10 +8,32 @@ const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
 const publicDir = path.join(__dirname, "..", "public");
 
-export function startServer({ port, host, onSellNow, onResetCooldown, onSetMode }) {
+export function startServer({
+  port,
+  host,
+  onSellNow,
+  onResetCooldown,
+  onSetMode,
+  onGetStats,
+  metricsEnabled = false,
+  metricsPath = "/metrics",
+  metricsRegister = null,
+  statsApiKey = "",
+}) {
   const app = express();
   app.use(express.static(publicDir));
   app.use(express.json());
+  const apiKey = process.env.UI_API_KEY;
+
+  const ensureStatsAuth = (req, res) => {
+    if (!statsApiKey) return true;
+    const header = req.headers["x-api-key"] || "";
+    const bearer = req.headers.authorization || "";
+    const token = bearer.startsWith("Bearer ") ? bearer.slice("Bearer ".length) : "";
+    if (header === statsApiKey || token === statsApiKey) return true;
+    res.status(401).json({ ok: false, error: "unauthorized" });
+    return false;
+  };
 
   app.post("/api/sell-now", async (req, res) => {
     if (!onSellNow) {
@@ -30,7 +52,7 @@ export function startServer({ port, host, onSellNow, onResetCooldown, onSetMode 
     }
   });
 
-  app.post("/api/reset-cooldown", async (req, res) => {
+  app.post("/api/reset-cooldown", requireApiKey, async (req, res) => {
     if (!onResetCooldown) {
       res.status(503).json({ ok: false, error: "reset_cooldown_unavailable" });
       return;
@@ -47,7 +69,7 @@ export function startServer({ port, host, onSellNow, onResetCooldown, onSetMode 
     }
   });
 
-  app.post("/api/mode", async (req, res) => {
+  app.post("/api/mode", requireApiKey, async (req, res) => {
     if (!onSetMode) {
       res.status(503).json({ ok: false, error: "mode_unavailable" });
       return;
@@ -68,6 +90,30 @@ export function startServer({ port, host, onSellNow, onResetCooldown, onSetMode 
       res.status(500).json({ ok: false, error: err?.message || String(err) });
     }
   });
+
+  app.get("/api/stats", (req, res) => {
+    if (!ensureStatsAuth(req, res)) return;
+    if (!onGetStats) {
+      res.status(503).json({ ok: false, error: "stats_unavailable" });
+      return;
+    }
+    try {
+      res.json({ ok: true, ...onGetStats() });
+    } catch (err) {
+      res.status(500).json({ ok: false, error: err?.message || String(err) });
+    }
+  });
+
+  if (metricsEnabled && metricsRegister) {
+    app.get(metricsPath, async (req, res) => {
+      try {
+        res.set("Content-Type", metricsRegister.contentType);
+        res.send(await metricsRegister.metrics());
+      } catch (err) {
+        res.status(500).send(err?.message || String(err));
+      }
+    });
+  }
 
   const server = http.createServer(app);
   const wss = new WebSocketServer({ server, path: "/ws" });

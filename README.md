@@ -27,6 +27,7 @@ RPC_URL=...
 BIRDEYE_API_KEY=...
 JUP_API_KEY=...
 KEYPAIR_PATH=path/to/your/keypair.json
+UI_API_KEY=your-shared-secret
 ```
 
 ## Run
@@ -36,6 +37,10 @@ npm start
 ```
 
 Open the dashboard at `http://localhost:8787` (or whatever `PORT` you set).
+
+## Observability
+- **Metrics**: When `METRICS_ENABLED=1`, Prometheus metrics are exposed at `METRICS_PATH` (default `/metrics`). Protect `/api/stats` with `STATS_API_KEY` if you enable the Discord bot.
+- **Discord bot**: Run `npm run discord:bot` after setting `DISCORD_BOT_TOKEN` and `DISCORD_STATS_URL` (defaults to `http://localhost:8787/api/stats`).
 
 ## Training dataset builder
 
@@ -70,6 +75,12 @@ To enable Parquet output, install `parquetjs-lite` (network restrictions may req
 
 ## Config
 See `.env.example` for parameters.
+
+### Multi-position sizing
+- `MAX_OPEN_POSITIONS` controls concurrent positions.
+- `TRADE_ALLOCATION_PCT` limits per-entry sizing as a percent of available SOL.
+- `MAX_POSITION_SOL` caps absolute SOL per position.
+- `MIN_REMAINING_SOL` preserves a SOL reserve after entries.
 
 ### Rug-pull tuning roadmap
 See `docs/rugpull_tuning.md` for the phased plan to collect data, label rug events, and tune the simulator with open-source modeling tools.
