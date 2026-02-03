@@ -182,8 +182,8 @@ async function writeParquet(rows, outputPath) {
     await writer.close();
     return { path: outputPath, format: "parquet" };
   } catch (err) {
-    const fallbackPath = outputPath.replace(/\\.parquet$/, \".jsonl\");
-    const payload = rows.map((row) => `${JSON.stringify(row)}\\n`).join(\"\");
+    const fallbackPath = outputPath.replace(/\.parquet$/, ".jsonl");
+    const payload = rows.map((row) => `${JSON.stringify(row)}\n`).join("");
     fs.writeFileSync(fallbackPath, payload);
     console.warn(
       `Failed to write Parquet (missing parquetjs-lite). Wrote JSONL to ${fallbackPath}.`

@@ -23,7 +23,22 @@ export function startServer({
   const app = express();
   app.use(express.static(publicDir));
   app.use(express.json());
-  const apiKey = process.env.UI_API_KEY;
+  const apiKey = process.env.UI_API_KEY || "";
+
+  const requireApiKey = (req, res, next) => {
+    if (!apiKey) {
+      next();
+      return;
+    }
+    const header = req.headers["x-api-key"] || "";
+    const bearer = req.headers.authorization || "";
+    const token = bearer.startsWith("Bearer ") ? bearer.slice("Bearer ".length) : "";
+    if (header === apiKey || token === apiKey) {
+      next();
+      return;
+    }
+    res.status(401).json({ ok: false, error: "unauthorized" });
+  };
 
   const ensureStatsAuth = (req, res) => {
     if (!statsApiKey) return true;
@@ -35,7 +50,7 @@ export function startServer({
     return false;
   };
 
-  app.post("/api/sell-now", async (req, res) => {
+  app.post("/api/sell-now", requireApiKey, async (req, res) => {
     if (!onSellNow) {
       res.status(503).json({ ok: false, error: "manual_sell_unavailable" });
       return;
