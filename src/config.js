@@ -44,6 +44,7 @@ const config = {
 
   host: process.env.HOST || "0.0.0.0",
   port: num("PORT", 8787),
+  mode: (process.env.MODE || "sharp").toLowerCase(),
   uiRefreshSeconds: num("UI_REFRESH_SECONDS", 5),
   scanIntervalSeconds: num("SCAN_INTERVAL_SECONDS", 30),
 
@@ -54,6 +55,11 @@ const config = {
   accountStopUsd: num("ACCOUNT_STOP_USD", 10),
   takeProfitPct: num("TAKE_PROFIT_PCT", 12),
   takeProfitUsd: num("TAKE_PROFIT_USD", 1),
+
+  simulatorMode: bool("SIMULATOR_MODE", false),
+  simulatorStartSol: num("SIMULATOR_START_SOL", 0),
+  simulatorStartUsd: num("SIMULATOR_START_USD", 0),
+  simulatorFeeBufferSol: num("SIMULATOR_FEE_BUFFER_SOL", 0.01),
 
   exitSoftMinutes: num("EXIT_SOFT_MINUTES", 15),
   exitHardMinutes: num("EXIT_HARD_MINUTES", 60),
