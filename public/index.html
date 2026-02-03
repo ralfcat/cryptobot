@@ -367,6 +367,28 @@
         color: #c8b8ff;
       }
 
+      .position-list {
+        margin-top: 12px;
+        display: grid;
+        gap: 8px;
+      }
+
+      .position-item {
+        display: flex;
+        justify-content: space-between;
+        gap: 12px;
+        padding: 8px 10px;
+        border-radius: 10px;
+        background: rgba(255, 255, 255, 0.04);
+        font-size: 12px;
+        color: var(--muted);
+      }
+
+      .position-item strong {
+        color: var(--text);
+        font-family: "JetBrains Mono", ui-monospace, monospace;
+      }
+
       .footer {
         color: var(--muted);
         font-size: 12px;
@@ -559,10 +581,12 @@
 
         <section class="card">
           <h3>Position</h3>
+          <div class="metric"><span>Open positions</span><strong id="pos-count">-</strong></div>
           <div class="metric"><span>Mint</span><strong id="pos-mint">-</strong></div>
           <div class="metric"><span>Held</span><strong id="pos-held">-</strong></div>
           <div class="metric"><span>PnL</span><strong id="pos-pnl">-</strong></div>
           <div class="metric"><span>Est value</span><strong id="pos-value">-</strong></div>
+          <div class="position-list" id="positions-list"></div>
         </section>
 
         <section class="card">
