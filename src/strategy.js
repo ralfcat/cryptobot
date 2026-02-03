@@ -1,6 +1,59 @@
+import fs from "fs";
+import path from "path";
 import config from "./config.js";
 import { avg, pctChange, sum } from "./utils.js";
 import { bollinger, emaSeries, lastEma, rsi } from "./indicators.js";
+
+const modelState = {
+  path: config.modelPath ? path.resolve(process.cwd(), config.modelPath) : "",
+  loadedAt: null,
+  model: null,
+  lastError: null,
+};
+
+function sigmoid(value) {
+  return 1 / (1 + Math.exp(-value));
+}
+
+function isValidModel(model) {
+  return (
+    model &&
+    Array.isArray(model.featureList) &&
+    model.featureList.length > 0 &&
+    model.weights &&
+    typeof model.weights === "object"
+  );
+}
+
+function loadModel() {
+  if (!modelState.path) return null;
+  try {
+    const raw = fs.readFileSync(modelState.path, "utf8");
+    const parsed = JSON.parse(raw);
+    if (!isValidModel(parsed)) {
+      throw new Error("Model file missing required fields.");
+    }
+    modelState.model = parsed;
+    modelState.loadedAt = Date.now();
+    modelState.lastError = null;
+    return parsed;
+  } catch (err) {
+    modelState.lastError = err instanceof Error ? err.message : String(err);
+    return null;
+  }
+}
+
+function scheduleModelRefresh() {
+  if (!modelState.path) return;
+  loadModel();
+  if (config.modelRefreshMs <= 0) return;
+  const timer = setInterval(() => {
+    loadModel();
+  }, config.modelRefreshMs);
+  if (timer.unref) timer.unref();
+}
+
+scheduleModelRefresh();
 
 export function normalizeCandles(ohlcv) {
   const items = ohlcv?.items || ohlcv?.data?.items || ohlcv?.data || [];
@@ -16,6 +69,56 @@ export function normalizeCandles(ohlcv) {
     .filter((c) => Number.isFinite(c.c) && Number.isFinite(c.v));
 
   return candles;
+}
+
+function buildModelFeatures({ rsiVal, emaFast, emaSlow, volumeSpike, valley, trend, trigger, last }) {
+  const emaFastMinusSlow =
+    emaFast !== null && emaSlow !== null ? emaFast - emaSlow : 0;
+  return {
+    rsi: rsiVal ?? 0,
+    emaFast: emaFast ?? 0,
+    emaSlow: emaSlow ?? 0,
+    volumeSpike: volumeSpike ? 1 : 0,
+    valley: valley ? 1 : 0,
+    trend: trend ? 1 : 0,
+    trigger: trigger ? 1 : 0,
+    price: last?.c ?? 0,
+    volume: last?.v ?? 0,
+    emaFastMinusSlow,
+  };
+}
+
+function normalizeFeatureValue(feature, value, normalization) {
+  const stats = normalization?.[feature];
+  if (!stats) return value;
+  const std = stats.std || 1;
+  return (value - stats.mean) / std;
+}
+
+function scoreWithModel(features) {
+  const model = modelState.model;
+  if (!isValidModel(model)) return null;
+  try {
+    let total = model.bias || 0;
+    for (const feature of model.featureList) {
+      const rawValue = Number.isFinite(features[feature]) ? features[feature] : 0;
+      const value = normalizeFeatureValue(feature, rawValue, model.normalization);
+      const weight = Number.isFinite(model.weights?.[feature]) ? model.weights[feature] : 0;
+      total += weight * value;
+    }
+    const probability = sigmoid(total);
+    return {
+      probability,
+      threshold: Number.isFinite(model.hyperparameters?.threshold)
+        ? model.hyperparameters.threshold
+        : config.modelThreshold,
+      modelVersion: model.version ?? null,
+      loadedAt: modelState.loadedAt,
+    };
+  } catch (err) {
+    modelState.lastError = err instanceof Error ? err.message : String(err);
+    return null;
+  }
 }
 
 export function computeSignal(candles) {
@@ -45,17 +148,33 @@ export function computeSignal(candles) {
   const trend = emaFast !== null && emaSlow !== null && emaFast > emaSlow && emaFastUp && emaSlowUp;
   const trigger = emaFast !== null && last.c > emaFast && volumeSpike;
 
-  const ok = (valley && trigger) || trend;
+  const ruleOk = (valley && trigger) || trend;
 
-  let score = 0;
-  if (trend) score += 2;
-  if (valley) score += 1;
-  if (trigger) score += 1;
-  if (rsiVal !== null && rsiVal > 50) score += 1;
+  let ruleScore = 0;
+  if (trend) ruleScore += 2;
+  if (valley) ruleScore += 1;
+  if (trigger) ruleScore += 1;
+  if (rsiVal !== null && rsiVal > 50) ruleScore += 1;
+
+  const features = buildModelFeatures({
+    rsiVal,
+    emaFast,
+    emaSlow,
+    volumeSpike,
+    valley,
+    trend,
+    trigger,
+    last,
+  });
+  const modelResult = scoreWithModel(features);
+  const modelThreshold = modelResult?.threshold ?? config.modelThreshold;
+  const ok = modelResult ? modelResult.probability >= modelThreshold : ruleOk;
+  const score = modelResult ? modelResult.probability : ruleScore;
 
   return {
     ok,
     score,
+    ruleScore,
     rsi: rsiVal,
     emaFast,
     emaSlow,
@@ -63,6 +182,20 @@ export function computeSignal(candles) {
     valley,
     trend,
     trigger,
+    model: modelResult
+      ? {
+          probability: modelResult.probability,
+          threshold: modelThreshold,
+          version: modelResult.modelVersion,
+          loadedAt: modelResult.loadedAt,
+        }
+      : {
+          probability: null,
+          threshold: config.modelThreshold,
+          version: null,
+          loadedAt: null,
+          error: modelState.lastError,
+        },
   };
 }
 
