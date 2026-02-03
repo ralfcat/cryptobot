@@ -7,10 +7,12 @@ const lastAction = el("last-action");
 const solBalance = el("sol-balance");
 const solUsd = el("sol-usd");
 const totalUsd = el("total-usd");
+const posCount = el("pos-count");
 const posMint = el("pos-mint");
 const posHeld = el("pos-held");
 const posPnl = el("pos-pnl");
 const posValue = el("pos-value");
+const positionsList = el("positions-list");
 const ruleStop = el("rule-stop");
 const ruleTp = el("rule-tp");
 const ruleSoft = el("rule-soft");
@@ -107,6 +109,24 @@ function renderTrades(items) {
       div.textContent = line;
       tradesEl.appendChild(div);
     });
+}
+
+function renderPositions(items) {
+  if (!positionsList) return;
+  positionsList.innerHTML = "";
+  if (!items || !items.length) {
+    positionsList.innerHTML = "<div class=\"position-item\"><span>No open positions.</span></div>";
+    return;
+  }
+  items.forEach((item) => {
+    const div = document.createElement("div");
+    div.className = "position-item";
+    const mint = item.mint ? `${item.mint.slice(0, 6)}...` : "-";
+    const pnl = Number.isFinite(item.pnlPct) ? `${fmtNum(item.pnlPct, 2)}%` : "-";
+    const est = Number.isFinite(item.estUsd) ? fmtUsd(item.estUsd) : "-";
+    div.innerHTML = `<span>${mint}</span><strong>${pnl} · ${est}</strong>`;
+    positionsList.appendChild(div);
+  });
 }
 
 function computeTradeStats(items) {
@@ -325,7 +345,12 @@ function update(payload) {
   solUsd.textContent = fmtUsd(balances.solUsd);
   totalUsd.textContent = fmtUsd(balances.totalUsd);
 
-  const pos = payload.position;
+  const positions = Array.isArray(payload.positions) && payload.positions.length
+    ? payload.positions
+    : payload.position
+      ? [payload.position]
+      : [];
+  const pos = positions[0];
   if (pos) {
     posMint.textContent = pos.mint;
     posHeld.textContent = `${fmtNum(pos.heldMinutes, 1)} min`;
@@ -337,6 +362,8 @@ function update(payload) {
     posPnl.textContent = "-";
     posValue.textContent = "-";
   }
+  if (posCount) posCount.textContent = positions.length ? String(positions.length) : "0";
+  renderPositions(positions);
 
   const rules = payload.rules || {};
   ruleStop.textContent = rules.stopLossPct ? `${fmtNum(rules.stopLossPct * 100, 0)}%` : "-";
@@ -350,7 +377,8 @@ function update(payload) {
   lastUpdate.textContent = payload.updatedAt ? fmtTime(payload.updatedAt) : "-";
 
   if (anaExposure) {
-    const exposure = pos?.estUsd && balances?.totalUsd ? (pos.estUsd / balances.totalUsd) * 100 : null;
+    const totalExposure = positions.reduce((acc, item) => acc + (item.estUsd || 0), 0);
+    const exposure = balances?.totalUsd ? (totalExposure / balances.totalUsd) * 100 : null;
     anaExposure.textContent = exposure === null || !Number.isFinite(exposure) ? "-" : fmtPct(exposure, 1);
   }
 
@@ -360,15 +388,15 @@ function update(payload) {
   updateModeControls(payload.mode);
 
   if (sellNowBtn) {
-    const hasPosition = Boolean(payload.position);
+    const hasPosition = Boolean(positions.length);
     sellNowBtn.disabled = !hasPosition || sellBusy;
     if (sellStatus && !sellBusy) {
-      sellStatus.textContent = hasPosition ? "Ready to sell current position." : "Waiting for position.";
+      sellStatus.textContent = hasPosition ? "Ready to sell current positions." : "Waiting for position.";
     }
   }
 
   if (resetCooldownBtn) {
-    const hasPosition = Boolean(payload.position);
+    const hasPosition = Boolean(positions.length);
     const remaining = Number(cd.remainingSec || 0);
     resetCooldownBtn.disabled = resetBusy || hasPosition;
     if (resetStatus && !resetBusy) {
@@ -431,12 +459,12 @@ if (modeSimulatorBtn) {
 
 async function requestSellNow() {
   if (sellBusy) return;
-  const hasPosition = Boolean(latestPayload?.position);
+  const hasPosition = Boolean(latestPayload?.positions?.length || latestPayload?.position);
   if (!hasPosition) {
     if (sellStatus) sellStatus.textContent = "No open position to sell.";
     return;
   }
-  if (!confirm("Sell the current position now?")) return;
+  if (!confirm("Sell the current positions now?")) return;
   sellBusy = true;
   if (sellNowBtn) sellNowBtn.disabled = true;
   if (sellStatus) sellStatus.textContent = "Sending sell request...";
@@ -458,7 +486,7 @@ async function requestSellNow() {
     if (sellStatus) sellStatus.textContent = `Failed: ${err?.message || err}`;
   } finally {
     sellBusy = false;
-    if (sellNowBtn) sellNowBtn.disabled = !latestPayload?.position;
+  if (sellNowBtn) sellNowBtn.disabled = !(latestPayload?.positions?.length || latestPayload?.position);
   }
 }
 
@@ -468,7 +496,7 @@ if (sellNowBtn) {
 
 async function requestResetCooldown() {
   if (resetBusy) return;
-  const hasPosition = Boolean(latestPayload?.position);
+  const hasPosition = Boolean(latestPayload?.positions?.length || latestPayload?.position);
   const remaining = Number(latestPayload?.cooldown?.remainingSec || 0);
   if (hasPosition) {
     if (resetStatus) resetStatus.textContent = "Cannot reset cooldown while holding a position.";
@@ -500,7 +528,7 @@ async function requestResetCooldown() {
     if (resetStatus) resetStatus.textContent = `Failed: ${err?.message || err}`;
   } finally {
     resetBusy = false;
-    if (resetCooldownBtn) resetCooldownBtn.disabled = Boolean(latestPayload?.position);
+    if (resetCooldownBtn) resetCooldownBtn.disabled = Boolean(latestPayload?.positions?.length || latestPayload?.position);
   }
 }
 
