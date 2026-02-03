@@ -95,5 +95,18 @@ export function startServer({ port, host, onSellNow, onResetCooldown, onSetMode 
     console.log(`UI server listening on http://${bindHost}:${port}`);
   });
 
-  return { broadcast };
+  const close = () =>
+    new Promise((resolve, reject) => {
+      wss.close(() => {
+        server.close((err) => {
+          if (err) {
+            reject(err);
+            return;
+          }
+          resolve();
+        });
+      });
+    });
+
+  return { broadcast, close, server };
 }
