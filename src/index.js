@@ -31,9 +31,24 @@ const __dirname = path.dirname(__filename);
 const tradesPath = path.join(__dirname, "..", "trades.jsonl");
 const tradesCsvPath = path.join(__dirname, "..", "trades.csv");
 
+const VALID_MODES = new Set(["sharp", "simulator"]);
+
+function normalizeMode(value) {
+  const mode = String(value || "").toLowerCase();
+  return VALID_MODES.has(mode) ? mode : "sharp";
+}
+
+function parseMode(value) {
+  const mode = String(value || "").toLowerCase();
+  return VALID_MODES.has(mode) ? mode : null;
+}
+
+let currentMode = normalizeMode(config.mode);
+
 const ui = {
   status: "starting",
   lastAction: "Starting bot",
+  mode: currentMode,
   balances: { sol: 0, solUsd: 0, totalUsd: 0 },
   position: null,
   rules: {
@@ -58,10 +73,8 @@ let manualExitRequested = false;
 let manualExitRequestedAt = 0;
 let birdeyeBlockedUntilMs = 0;
 
-function formatStatus(status) {
-  if (!config.simulatorMode || !status) return status;
-  if (status.startsWith("simulating")) return status;
-  return `simulating:${status}`;
+function isSimulatorMode() {
+  return currentMode === "simulator";
 }
 
 function broadcastUi(patch = {}) {
@@ -687,6 +700,11 @@ async function pickCandidate(connection, tradeLamports) {
 }
 
 async function sendSwap(connection, keypair, quoteResponse) {
+  if (isSimulatorMode()) {
+    const simulatedSig = `SIM-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 7)}`;
+    pushLog("info", `Simulated swap (no transaction sent): ${simulatedSig}`);
+    return simulatedSig;
+  }
   const swap = await getSwapTx(quoteResponse, keypair.publicKey.toBase58());
   const swapTxB64 = swap?.swapTransaction;
   if (!swapTxB64) throw new Error("Missing swapTransaction in response.");
@@ -729,18 +747,18 @@ async function enterPosition(connection, keypair, tradeLamports, candidate, { si
   };
 }
 
-async function exitPosition(connection, keypair, position, { simulate = false } = {}) {
-  if (simulate) {
-    const valuation = await estimateTokenValueSol(position);
-    return { sig: `sim-${nowMs()}`, outSol: valuation.outSol, quote: valuation.quote };
+async function exitPosition(connection, keypair, position) {
+  let amountRaw;
+  if (isSimulatorMode()) {
+    amountRaw = Math.floor(position.tokenAmount * 10 ** position.tokenDecimals);
+  } else {
+    amountRaw = await getTokenBalanceRaw(
+      connection,
+      keypair.publicKey,
+      new PublicKey(position.mint)
+    );
+    if (amountRaw <= 0n) throw new Error("No token amount to sell.");
   }
-
-  const amountRaw = await getTokenBalanceRaw(
-    connection,
-    keypair.publicKey,
-    new PublicKey(position.mint)
-  );
-  if (amountRaw <= 0n) throw new Error("No token amount to sell.");
 
   const quote = await getQuote({
     inputMint: position.mint,
@@ -839,26 +857,16 @@ async function run() {
     return { ok: true, reset: true, remainingSec: updated.remainingSec };
   };
 
-  const requestSetSimBalance = async (payload = {}) => {
-    if (!isSimulator) return { ok: false, error: "simulator_disabled" };
-    const { sol, usd, reset } = payload || {};
-    if (getActivePosition()) return { ok: false, error: "position_open" };
-    if (reset) {
-      const startSol = await resolveSimulatorStartBalance();
-      state.simBalanceSol = startSol;
-    } else if (Number.isFinite(Number(sol))) {
-      state.simBalanceSol = Math.max(0, Number(sol));
-    } else if (Number.isFinite(Number(usd))) {
-      const solUsd = await getSolUsdPriceCached();
-      state.simBalanceSol = solUsd > 0 ? Math.max(0, Number(usd)) / solUsd : 0;
-    } else {
-      return { ok: false, error: "missing_balance" };
+  const requestSetMode = (mode) => {
+    const normalized = parseMode(mode);
+    if (!normalized) return { ok: false, error: "invalid_mode" };
+    if (currentMode === normalized) {
+      return { ok: true, mode: currentMode, changed: false };
     }
-    const solUsd = await getSolUsdPriceCached();
-    state.simBalanceUsd = state.simBalanceSol * solUsd;
-    saveState(state);
-    pushLog("info", `Simulator balance set to ${state.simBalanceSol.toFixed(4)} SOL.`);
-    return { ok: true, simBalanceSol: state.simBalanceSol, simBalanceUsd: state.simBalanceUsd };
+    currentMode = normalized;
+    broadcastUi({ mode: currentMode });
+    pushLog("warn", `Mode switched to ${currentMode}.`);
+    return { ok: true, mode: currentMode, changed: true };
   };
 
   uiServer = startServer({
@@ -866,7 +874,7 @@ async function run() {
     host: config.host,
     onSellNow: requestManualExit,
     onResetCooldown: requestResetCooldown,
-    onSetSimBalance: requestSetSimBalance,
+    onSetMode: requestSetMode,
   });
   pushLog("info", `UI available at http://localhost:${config.port}`);
 
@@ -909,13 +917,16 @@ async function run() {
           profitUsd = (outSol - position.entrySol) * solUsdNow;
           const exitResult = await exitPosition(connection, keypair, position, { simulate: isSimulator });
           manualExitRequested = false;
-          if (isSimulator) {
-            const realizedSol = exitResult.outSol ?? outSol;
-            if (Number.isFinite(realizedSol)) state.simBalanceSol += realizedSol;
-          }
-          pushLog("info", `Exit tx: ${exitResult.sig}`);
-          pushTrade({ side: "sell", mint: position.mint, pnlPct, profitUsd, sig: exitResult.sig, reason: "manual" });
-          setActivePosition(null);
+          pushLog("info", `${isSimulatorMode() ? "Simulated" : "Exit"} tx: ${sig}`);
+          pushTrade({
+            side: "sell",
+            mint: position.mint,
+            pnlPct,
+            profitUsd,
+            sig,
+            reason: isSimulatorMode() ? "manual_simulated" : "manual",
+          });
+          state.position = null;
           state.lastExitTimeMs = nowMs();
           if (isSimulator) state.simBalanceUsd = state.simBalanceSol * (solUsdNow || 0);
           saveState(state);
@@ -946,21 +957,17 @@ async function run() {
 
         if (totalValueUsd !== null && totalValueUsd <= config.accountStopUsd) {
           pushLog("warn", "Account stop triggered. Exiting.");
-          const exitResult = await exitPosition(connection, keypair, position, { simulate: isSimulator });
-          if (isSimulator && Number.isFinite(outSol)) {
-            state.simBalanceSol += outSol;
-            state.simBalanceUsd = state.simBalanceSol * solUsd;
-          }
-          pushLog("info", `Exit tx: ${exitResult.sig}`);
+          const sig = await exitPosition(connection, keypair, position);
+          pushLog("info", `${isSimulatorMode() ? "Simulated" : "Exit"} tx: ${sig}`);
           pushTrade({
             side: "sell",
             mint: position.mint,
             pnlPct,
             profitUsd,
-            sig: exitResult.sig,
-            reason: "account_stop",
+            sig,
+            reason: isSimulatorMode() ? "account_stop_simulated" : "account_stop",
           });
-          setActivePosition(null);
+          state.position = null;
           state.lastExitTimeMs = nowMs();
           saveState(state);
           continue;
@@ -968,14 +975,17 @@ async function run() {
 
         if (pnlPct !== null && pnlPct <= -config.stopLossPct * 100) {
           pushLog("warn", "Stop loss triggered. Exiting.");
-          const exitResult = await exitPosition(connection, keypair, position, { simulate: isSimulator });
-          if (isSimulator && Number.isFinite(outSol)) {
-            state.simBalanceSol += outSol;
-            state.simBalanceUsd = state.simBalanceSol * solUsd;
-          }
-          pushLog("info", `Exit tx: ${exitResult.sig}`);
-          pushTrade({ side: "sell", mint: position.mint, pnlPct, profitUsd, sig: exitResult.sig, reason: "stop_loss" });
-          setActivePosition(null);
+          const sig = await exitPosition(connection, keypair, position);
+          pushLog("info", `${isSimulatorMode() ? "Simulated" : "Exit"} tx: ${sig}`);
+          pushTrade({
+            side: "sell",
+            mint: position.mint,
+            pnlPct,
+            profitUsd,
+            sig,
+            reason: isSimulatorMode() ? "stop_loss_simulated" : "stop_loss",
+          });
+          state.position = null;
           state.lastExitTimeMs = nowMs();
           saveState(state);
           continue;
@@ -983,21 +993,17 @@ async function run() {
 
         if (pnlPct !== null && profitUsd !== null && shouldTakeProfit(pnlPct, profitUsd)) {
           pushLog("info", "Take profit triggered. Exiting.");
-          const exitResult = await exitPosition(connection, keypair, position, { simulate: isSimulator });
-          if (isSimulator && Number.isFinite(outSol)) {
-            state.simBalanceSol += outSol;
-            state.simBalanceUsd = state.simBalanceSol * solUsd;
-          }
-          pushLog("info", `Exit tx: ${exitResult.sig}`);
+          const sig = await exitPosition(connection, keypair, position);
+          pushLog("info", `${isSimulatorMode() ? "Simulated" : "Exit"} tx: ${sig}`);
           pushTrade({
             side: "sell",
             mint: position.mint,
             pnlPct,
             profitUsd,
-            sig: exitResult.sig,
-            reason: "take_profit",
+            sig,
+            reason: isSimulatorMode() ? "take_profit_simulated" : "take_profit",
           });
-          setActivePosition(null);
+          state.position = null;
           state.lastExitTimeMs = nowMs();
           saveState(state);
           continue;
@@ -1005,21 +1011,17 @@ async function run() {
 
         if (timeStopHit) {
           pushLog("info", "Hard time stop. Exiting.");
-          if (outSol === null) {
-            const valuation = await estimateTokenValueSol(position);
-            outSol = valuation.outSol;
-            pnlPct = pctChange(position.entrySol, outSol);
-            const solUsdNow = solUsd ?? (await getSolUsdPriceCached());
-            profitUsd = (outSol - position.entrySol) * solUsdNow;
-          }
-          const exitResult = await exitPosition(connection, keypair, position, { simulate: isSimulator });
-          if (isSimulator && Number.isFinite(outSol)) {
-            state.simBalanceSol += outSol;
-            state.simBalanceUsd = state.simBalanceSol * solUsd;
-          }
-          pushLog("info", `Exit tx: ${exitResult.sig}`);
-          pushTrade({ side: "sell", mint: position.mint, pnlPct, profitUsd, sig: exitResult.sig, reason: "hard_time" });
-          setActivePosition(null);
+          const sig = await exitPosition(connection, keypair, position);
+          pushLog("info", `${isSimulatorMode() ? "Simulated" : "Exit"} tx: ${sig}`);
+          pushTrade({
+            side: "sell",
+            mint: position.mint,
+            pnlPct,
+            profitUsd,
+            sig,
+            reason: isSimulatorMode() ? "hard_time_simulated" : "hard_time",
+          });
+          state.position = null;
           state.lastExitTimeMs = nowMs();
           saveState(state);
           continue;
@@ -1029,28 +1031,17 @@ async function run() {
           const canExtend = pnlPct !== null && pnlPct >= config.minProfitToExtendPct && (await shouldExtendHold(position));
           if (!canExtend) {
             pushLog("info", "Soft time stop. Exiting.");
-            if (outSol === null) {
-              const valuation = await estimateTokenValueSol(position);
-              outSol = valuation.outSol;
-              pnlPct = pctChange(position.entrySol, outSol);
-              const solUsdNow = solUsd ?? (await getSolUsdPriceCached());
-              profitUsd = (outSol - position.entrySol) * solUsdNow;
-            }
-            const exitResult = await exitPosition(connection, keypair, position, { simulate: isSimulator });
-            if (isSimulator && Number.isFinite(outSol)) {
-              state.simBalanceSol += outSol;
-              state.simBalanceUsd = state.simBalanceSol * solUsd;
-            }
-            pushLog("info", `Exit tx: ${exitResult.sig}`);
+            const sig = await exitPosition(connection, keypair, position);
+            pushLog("info", `${isSimulatorMode() ? "Simulated" : "Exit"} tx: ${sig}`);
             pushTrade({
               side: "sell",
               mint: position.mint,
               pnlPct,
               profitUsd,
-              sig: exitResult.sig,
-              reason: "soft_time",
+              sig,
+              reason: isSimulatorMode() ? "soft_time_simulated" : "soft_time",
             });
-            setActivePosition(null);
+            state.position = null;
             state.lastExitTimeMs = nowMs();
             saveState(state);
             continue;
@@ -1153,9 +1144,9 @@ async function run() {
             pnlPct: 0,
             profitUsd: 0,
             sig: position.signature,
-            reason: "entry",
+            reason: isSimulatorMode() ? "entry_simulated" : "entry",
           });
-          pushLog("info", `Entry tx: ${position.signature}`);
+          pushLog("info", `${isSimulatorMode() ? "Simulated" : "Entry"} tx: ${position.signature}`);
         }
       }
     } catch (err) {
