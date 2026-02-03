@@ -45,7 +45,8 @@ function parseMode(value) {
   return VALID_MODES.has(mode) ? mode : null;
 }
 
-let currentMode = normalizeMode(config.mode);
+const initialMode = config.simulatorMode ? "simulator" : config.mode;
+let currentMode = normalizeMode(initialMode);
 
 const ui = {
   status: "starting",
@@ -88,7 +89,7 @@ function broadcastUi(patch = {}) {
 }
 
 function pushLog(level, msg) {
-  const prefix = config.simulatorMode ? "[SIM] " : "";
+  const prefix = isSimulatorMode() ? "[SIM] " : "";
   const text = msg.startsWith(prefix) ? msg : `${prefix}${msg}`;
   const entry = { t: nowMs(), level, msg: text };
   ui.logs.push(entry);
@@ -944,12 +945,17 @@ async function run() {
   requireConfig();
   const connection = createConnection(config.rpcUrl);
   const state = loadState();
-  const isSimulator = config.simulatorMode;
-  const keypair = isSimulator ? null : loadKeypair();
+  let keypair = null;
 
-  const getActivePosition = () => (isSimulator ? state.simPosition : state.position);
+  const getKeypair = () => {
+    if (isSimulatorMode()) return null;
+    if (!keypair) keypair = loadKeypair();
+    return keypair;
+  };
+
+  const getActivePosition = () => (isSimulatorMode() ? state.simPosition : state.position);
   const setActivePosition = (value) => {
-    if (isSimulator) state.simPosition = value;
+    if (isSimulatorMode()) state.simPosition = value;
     else state.position = value;
   };
 
@@ -966,16 +972,18 @@ async function run() {
     return 0;
   };
 
-  if (isSimulator && state.simBalanceSol <= 0) {
+  const ensureSimulatorBalance = async () => {
+    if (!isSimulatorMode() || state.simBalanceSol > 0) return;
     const startSol = await resolveSimulatorStartBalance();
-    if (startSol > 0) {
-      state.simBalanceSol = startSol;
-      const solUsd = await getSolUsdPriceCached();
-      state.simBalanceUsd = state.simBalanceSol * solUsd;
-      saveState(state);
-      pushLog("info", `Simulator balance initialized to ${state.simBalanceSol.toFixed(4)} SOL.`);
-    }
-  }
+    if (startSol <= 0) return;
+    state.simBalanceSol = startSol;
+    const solUsd = await getSolUsdPriceCached();
+    state.simBalanceUsd = state.simBalanceSol * solUsd;
+    saveState(state);
+    pushLog("info", `Simulator balance initialized to ${state.simBalanceSol.toFixed(4)} SOL.`);
+  };
+
+  await ensureSimulatorBalance();
 
   const requestManualExit = () => {
     if (!getActivePosition()) return { ok: false, error: "no_position" };
@@ -1026,6 +1034,8 @@ async function run() {
   while (true) {
     try {
       const now = nowMs();
+      await ensureSimulatorBalance();
+      const simulatorActive = isSimulatorMode();
       const cooldown = getCooldown(state);
       const shouldUpdateUi = now - lastUiUpdateMs >= config.uiRefreshSeconds * 1000;
       const shouldScan =
@@ -1036,7 +1046,7 @@ async function run() {
       let solBalance = null;
       let solUsd = null;
       if (shouldUpdateUi || shouldScan || getActivePosition()) {
-        solBalance = isSimulator ? state.simBalanceSol : await getSolBalance(connection, keypair.publicKey);
+        solBalance = simulatorActive ? state.simBalanceSol : await getSolBalance(connection, getKeypair().publicKey);
       }
       if (shouldUpdateUi || getActivePosition() || shouldScan) {
         solUsd = await getSolUsdPriceCached();
@@ -1060,7 +1070,7 @@ async function run() {
           pnlPct = pctChange(position.entrySol, outSol);
           const solUsdNow = solUsd ?? (await getSolUsdPriceCached());
           profitUsd = (outSol - position.entrySol) * solUsdNow;
-          const exitResult = await exitPosition(connection, keypair, position, { simulate: isSimulator });
+          const { sig } = await exitPosition(connection, getKeypair(), position);
           manualExitRequested = false;
           pushLog("info", `Exit tx: ${sig}`);
           pushTrade({ side: "sell", mint: position.mint, pnlPct, profitUsd, sig, reason: "manual" });
@@ -1077,9 +1087,9 @@ async function run() {
               entrySnapshot: position.entrySnapshot ?? null,
             })
           );
-          state.position = null;
+          setActivePosition(null);
           state.lastExitTimeMs = nowMs();
-          if (isSimulator) state.simBalanceUsd = state.simBalanceSol * (solUsdNow || 0);
+          if (simulatorActive) state.simBalanceUsd = state.simBalanceSol * (solUsdNow || 0);
           saveState(state);
           continue;
         }
@@ -1108,7 +1118,7 @@ async function run() {
 
         if (totalValueUsd !== null && totalValueUsd <= config.accountStopUsd) {
           pushLog("warn", "Account stop triggered. Exiting.");
-          const sig = await exitPosition(connection, keypair, position);
+          const { sig } = await exitPosition(connection, getKeypair(), position);
           pushLog("info", `Exit tx: ${sig}`);
           pushTrade({ side: "sell", mint: position.mint, pnlPct, profitUsd, sig, reason: "account_stop" });
           pushTrainingEvent(
@@ -1124,7 +1134,7 @@ async function run() {
               entrySnapshot: position.entrySnapshot ?? null,
             })
           );
-          state.position = null;
+          setActivePosition(null);
           state.lastExitTimeMs = nowMs();
           saveState(state);
           continue;
@@ -1132,7 +1142,7 @@ async function run() {
 
         if (pnlPct !== null && pnlPct <= -config.stopLossPct * 100) {
           pushLog("warn", "Stop loss triggered. Exiting.");
-          const sig = await exitPosition(connection, keypair, position);
+          const { sig } = await exitPosition(connection, getKeypair(), position);
           pushLog("info", `Exit tx: ${sig}`);
           pushTrade({ side: "sell", mint: position.mint, pnlPct, profitUsd, sig, reason: "stop_loss" });
           pushTrainingEvent(
@@ -1148,7 +1158,7 @@ async function run() {
               entrySnapshot: position.entrySnapshot ?? null,
             })
           );
-          state.position = null;
+          setActivePosition(null);
           state.lastExitTimeMs = nowMs();
           saveState(state);
           continue;
@@ -1156,7 +1166,7 @@ async function run() {
 
         if (pnlPct !== null && profitUsd !== null && shouldTakeProfit(pnlPct, profitUsd)) {
           pushLog("info", "Take profit triggered. Exiting.");
-          const sig = await exitPosition(connection, keypair, position);
+          const { sig } = await exitPosition(connection, getKeypair(), position);
           pushLog("info", `Exit tx: ${sig}`);
           pushTrade({ side: "sell", mint: position.mint, pnlPct, profitUsd, sig, reason: "take_profit" });
           pushTrainingEvent(
@@ -1172,7 +1182,7 @@ async function run() {
               entrySnapshot: position.entrySnapshot ?? null,
             })
           );
-          state.position = null;
+          setActivePosition(null);
           state.lastExitTimeMs = nowMs();
           saveState(state);
           continue;
@@ -1180,7 +1190,7 @@ async function run() {
 
         if (timeStopHit) {
           pushLog("info", "Hard time stop. Exiting.");
-          const sig = await exitPosition(connection, keypair, position);
+          const { sig } = await exitPosition(connection, getKeypair(), position);
           pushLog("info", `Exit tx: ${sig}`);
           pushTrade({ side: "sell", mint: position.mint, pnlPct, profitUsd, sig, reason: "hard_time" });
           pushTrainingEvent(
@@ -1196,7 +1206,7 @@ async function run() {
               entrySnapshot: position.entrySnapshot ?? null,
             })
           );
-          state.position = null;
+          setActivePosition(null);
           state.lastExitTimeMs = nowMs();
           saveState(state);
           continue;
@@ -1206,7 +1216,7 @@ async function run() {
           const canExtend = pnlPct !== null && pnlPct >= config.minProfitToExtendPct && (await shouldExtendHold(position));
           if (!canExtend) {
             pushLog("info", "Soft time stop. Exiting.");
-            const sig = await exitPosition(connection, keypair, position);
+            const { sig } = await exitPosition(connection, getKeypair(), position);
             pushLog("info", `Exit tx: ${sig}`);
             pushTrade({ side: "sell", mint: position.mint, pnlPct, profitUsd, sig, reason: "soft_time" });
             pushTrainingEvent(
@@ -1222,7 +1232,7 @@ async function run() {
                 entrySnapshot: position.entrySnapshot ?? null,
               })
             );
-            state.position = null;
+            setActivePosition(null);
             state.lastExitTimeMs = nowMs();
             saveState(state);
             continue;
@@ -1282,7 +1292,7 @@ async function run() {
         }
 
         const totalUsd = solBalance * solUsd;
-        const feeBufferSol = isSimulator ? config.simulatorFeeBufferSol : config.feeBufferSol;
+        const feeBufferSol = simulatorActive ? config.simulatorFeeBufferSol : config.feeBufferSol;
         const tradeSol = Math.max(0, solBalance - feeBufferSol);
         if (tradeSol <= 0) {
           pushLog("warn", "Not enough SOL after fee buffer.");
@@ -1310,11 +1320,13 @@ async function run() {
             `Entering ${candidate.name || candidate.address} impact ${candidate.priceImpactPct?.toFixed?.(2) ?? "?"}%${volatilityNote}${momentumNote}`
           );
           const entrySnapshot = buildEntrySnapshot(candidate);
-          const position = await enterPosition(connection, keypair, tradeLamports, candidate);
+          const position = await enterPosition(connection, getKeypair(), tradeLamports, candidate, {
+            simulate: simulatorActive,
+          });
           position.entrySnapshot = entrySnapshot;
-          state.position = position;
+          setActivePosition(position);
           state.lastTradeTimeMs = nowMs();
-          if (isSimulator) {
+          if (simulatorActive) {
             state.simBalanceSol = Math.max(0, state.simBalanceSol - position.entrySol);
             state.simBalanceUsd = state.simBalanceSol * solUsd;
           }
@@ -1326,7 +1338,7 @@ async function run() {
             pnlPct: 0,
             profitUsd: 0,
             sig: position.signature,
-            reason: isSimulatorMode() ? "entry_simulated" : "entry",
+            reason: simulatorActive ? "entry_simulated" : "entry",
           });
           pushTrainingEvent(
             buildTrainingEvent({
