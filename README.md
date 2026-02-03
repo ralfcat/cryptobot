@@ -37,6 +37,39 @@ npm start
 
 Open the dashboard at `http://localhost:8787` (or whatever `PORT` you set).
 
+## Containerization
+
+### Services
+- **bot**: Node.js 18 runtime that runs `npm start` for the trading bot.
+- **trainer**: Python 3.11 runtime for model training. Replace `trainer/train.py` with your training code.
+
+### Environment variables
+The bot service expects the same variables as `.env.example`:
+
+```
+RPC_URL=...
+BIRDEYE_API_KEY=...
+JUP_API_KEY=...
+KEYPAIR_PATH=/app/keys/keypair.json
+PORT=8787
+```
+
+### Volume mounts
+The `docker-compose.yml` sets up shared volumes for datasets and models:
+
+- `./data/datasets` → `/app/data/datasets` (bot)
+- `./data/models` → `/app/data/models` (bot)
+- `./data/datasets` → `/trainer/data` (trainer)
+- `./data/models` → `/trainer/models` (trainer)
+
+These mounts let the trainer write datasets/models that the bot can later consume.
+
+### Run with Docker Compose
+
+```bash
+docker compose up --build
+```
+
 ## Core rules implemented
 - **All-in trade** using available SOL minus a small fee buffer.
 - **Stop loss** at -20%.
@@ -54,6 +87,25 @@ Open the dashboard at `http://localhost:8787` (or whatever `PORT` you set).
 
 ## Config
 See `.env.example` for parameters.
+
+### Simulator mode (paper trading)
+Set `SIMULATOR_MODE=1` to run the bot without sending on-chain swaps. The scanner and strategy logic are identical, but balances and positions are stored in `state.json` under `simBalanceSol`/`simPosition`. In simulator mode you can omit wallet secrets because swaps are never signed.
+
+Configure a starting balance with either `SIMULATOR_START_SOL` (preferred) or `SIMULATOR_START_USD`. If both are set, the SOL value is used. `SIMULATOR_FEE_BUFFER_SOL` mirrors `FEE_BUFFER_SOL` for the paper wallet. You can also change the in-memory balance while the bot is running by posting to:
+
+```
+POST /api/sim-balance
+{ "sol": 1.25 }
+```
+
+Or reset to the configured start balance with:
+
+```
+POST /api/sim-balance
+{ "reset": true }
+```
+## Training orchestration
+Use the orchestration layer to run ETL → training → evaluation → promotion and write the `models/latest.json` pointer consumed by the bot. See `docs/training.md` for setup and environment variables.
 
 ### Momentum mode (optional)
 Set `MOMENTUM_MODE=1` to rank candidates by recent price change (short + long lookback) instead of the RSI/EMA signal. Use the `MOMENTUM_*` settings in `.env.example` to tune the lookbacks, minimum % change, and weighting.

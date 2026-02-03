@@ -78,18 +78,22 @@ function isSimulatorMode() {
 }
 
 function broadcastUi(patch = {}) {
-  Object.assign(ui, patch);
+  const next = { ...patch };
+  if (next.status) next.status = formatStatus(next.status);
+  Object.assign(ui, next);
   ui.updatedAt = nowMs();
   if (uiServer) uiServer.broadcast(ui);
 }
 
 function pushLog(level, msg) {
-  const entry = { t: nowMs(), level, msg };
+  const prefix = config.simulatorMode ? "[SIM] " : "";
+  const text = msg.startsWith(prefix) ? msg : `${prefix}${msg}`;
+  const entry = { t: nowMs(), level, msg: text };
   ui.logs.push(entry);
   if (ui.logs.length > 200) ui.logs.shift();
-  ui.lastAction = msg;
-  if (level === "error") console.error(msg);
-  else console.log(msg);
+  ui.lastAction = text;
+  if (level === "error") console.error(text);
+  else console.log(text);
   broadcastUi();
 }
 
@@ -711,13 +715,10 @@ async function sendSwap(connection, keypair, quoteResponse) {
   return sig;
 }
 
-async function enterPosition(connection, keypair, tradeLamports, candidate) {
-  const adjustedLamports = await adjustTradeLamportsForAtaRent(
-    connection,
-    keypair.publicKey,
-    candidate.address,
-    tradeLamports
-  );
+async function enterPosition(connection, keypair, tradeLamports, candidate, { simulate = false } = {}) {
+  const adjustedLamports = simulate
+    ? tradeLamports
+    : await adjustTradeLamportsForAtaRent(connection, keypair.publicKey, candidate.address, tradeLamports);
   const freshQuote = await getQuote({
     inputMint: SOL_MINT,
     outputMint: candidate.address,
@@ -730,7 +731,7 @@ async function enterPosition(connection, keypair, tradeLamports, candidate) {
   if (priceImpactPct !== null && priceImpactPct > config.maxPriceImpactPct) {
     throw new Error(`Price impact too high: ${priceImpactPct.toFixed(2)}%`);
   }
-  const sig = await sendSwap(connection, keypair, freshQuote);
+  const sig = simulate ? `sim-${nowMs()}` : await sendSwap(connection, keypair, freshQuote);
 
   const outAmount = Number(freshQuote.outAmount || 0);
   const mintInfo = await getMintInfo(connection, new PublicKey(candidate.address));
@@ -769,7 +770,8 @@ async function exitPosition(connection, keypair, position) {
   });
 
   const sig = await sendSwap(connection, keypair, quote);
-  return sig;
+  const outSol = Number(quote.outAmount || 0) / LAMPORTS_PER_SOL;
+  return { sig, outSol, quote };
 }
 
 async function estimateTokenValueSol(position) {
@@ -796,22 +798,53 @@ async function shouldExtendHold(position) {
 async function run() {
   requireConfig();
   const connection = createConnection(config.rpcUrl);
-  const keypair = loadKeypair();
   const state = loadState();
+  const isSimulator = config.simulatorMode;
+  const keypair = isSimulator ? null : loadKeypair();
+
+  const getActivePosition = () => (isSimulator ? state.simPosition : state.position);
+  const setActivePosition = (value) => {
+    if (isSimulator) state.simPosition = value;
+    else state.position = value;
+  };
+
+  const ensureNumber = (value, fallback = 0) => (Number.isFinite(value) ? value : fallback);
+  state.simBalanceSol = ensureNumber(state.simBalanceSol, 0);
+  state.simBalanceUsd = ensureNumber(state.simBalanceUsd, 0);
+
+  const resolveSimulatorStartBalance = async () => {
+    if (config.simulatorStartSol > 0) return config.simulatorStartSol;
+    if (config.simulatorStartUsd > 0) {
+      const solUsd = await getSolUsdPriceCached();
+      if (solUsd > 0) return config.simulatorStartUsd / solUsd;
+    }
+    return 0;
+  };
+
+  if (isSimulator && state.simBalanceSol <= 0) {
+    const startSol = await resolveSimulatorStartBalance();
+    if (startSol > 0) {
+      state.simBalanceSol = startSol;
+      const solUsd = await getSolUsdPriceCached();
+      state.simBalanceUsd = state.simBalanceSol * solUsd;
+      saveState(state);
+      pushLog("info", `Simulator balance initialized to ${state.simBalanceSol.toFixed(4)} SOL.`);
+    }
+  }
 
   const requestManualExit = () => {
-    if (!state.position) return { ok: false, error: "no_position" };
+    if (!getActivePosition()) return { ok: false, error: "no_position" };
     if (manualExitRequested) {
-      return { ok: true, requested: true, mint: state.position.mint, alreadyQueued: true };
+      return { ok: true, requested: true, mint: getActivePosition().mint, alreadyQueued: true };
     }
     manualExitRequested = true;
     manualExitRequestedAt = nowMs();
     pushLog("warn", "Manual sell requested. Exiting on next loop.");
-    return { ok: true, requested: true, mint: state.position.mint, queuedAt: manualExitRequestedAt };
+    return { ok: true, requested: true, mint: getActivePosition().mint, queuedAt: manualExitRequestedAt };
   };
 
   const requestResetCooldown = () => {
-    if (state.position) return { ok: false, error: "position_open" };
+    if (getActivePosition()) return { ok: false, error: "position_open" };
     const current = getCooldown(state);
     if (current.remainingSec <= 0) {
       return { ok: true, reset: false, remainingSec: 0 };
@@ -851,21 +884,21 @@ async function run() {
       const cooldown = getCooldown(state);
       const shouldUpdateUi = now - lastUiUpdateMs >= config.uiRefreshSeconds * 1000;
       const shouldScan =
-        !state.position &&
+        !getActivePosition() &&
         cooldown.remainingSec <= 0 &&
         now - lastScanMs >= config.scanIntervalSeconds * 1000;
 
       let solBalance = null;
       let solUsd = null;
-      if (shouldUpdateUi || shouldScan || state.position) {
-        solBalance = await getSolBalance(connection, keypair.publicKey);
+      if (shouldUpdateUi || shouldScan || getActivePosition()) {
+        solBalance = isSimulator ? state.simBalanceSol : await getSolBalance(connection, keypair.publicKey);
       }
-      if (shouldUpdateUi || state.position || shouldScan) {
+      if (shouldUpdateUi || getActivePosition() || shouldScan) {
         solUsd = await getSolUsdPriceCached();
       }
 
-      if (state.position) {
-        const position = state.position;
+      if (getActivePosition()) {
+        const position = getActivePosition();
         const heldMinutes = (now - position.entryTimeMs) / 60000;
         const timeStopHit = heldMinutes >= config.exitHardMinutes;
         const softStopHit = heldMinutes >= config.exitSoftMinutes;
@@ -882,7 +915,7 @@ async function run() {
           pnlPct = pctChange(position.entrySol, outSol);
           const solUsdNow = solUsd ?? (await getSolUsdPriceCached());
           profitUsd = (outSol - position.entrySol) * solUsdNow;
-          const sig = await exitPosition(connection, keypair, position);
+          const exitResult = await exitPosition(connection, keypair, position, { simulate: isSimulator });
           manualExitRequested = false;
           pushLog("info", `${isSimulatorMode() ? "Simulated" : "Exit"} tx: ${sig}`);
           pushTrade({
@@ -895,6 +928,7 @@ async function run() {
           });
           state.position = null;
           state.lastExitTimeMs = nowMs();
+          if (isSimulator) state.simBalanceUsd = state.simBalanceSol * (solUsdNow || 0);
           saveState(state);
           continue;
         }
@@ -1067,7 +1101,8 @@ async function run() {
         }
 
         const totalUsd = solBalance * solUsd;
-        const tradeSol = Math.max(0, solBalance - config.feeBufferSol);
+        const feeBufferSol = isSimulator ? config.simulatorFeeBufferSol : config.feeBufferSol;
+        const tradeSol = Math.max(0, solBalance - feeBufferSol);
         if (tradeSol <= 0) {
           pushLog("warn", "Not enough SOL after fee buffer.");
           await sleep(LOOP_MS);
@@ -1093,9 +1128,15 @@ async function run() {
             "info",
             `Entering ${candidate.name || candidate.address} impact ${candidate.priceImpactPct?.toFixed?.(2) ?? "?"}%${volatilityNote}${momentumNote}`
           );
-          const position = await enterPosition(connection, keypair, tradeLamports, candidate);
-          state.position = position;
+          const position = await enterPosition(connection, keypair, tradeLamports, candidate, {
+            simulate: isSimulator,
+          });
+          setActivePosition(position);
           state.lastTradeTimeMs = nowMs();
+          if (isSimulator) {
+            state.simBalanceSol = Math.max(0, state.simBalanceSol - position.entrySol);
+            state.simBalanceUsd = state.simBalanceSol * solUsd;
+          }
           saveState(state);
           pushTrade({
             side: "buy",
