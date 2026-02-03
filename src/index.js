@@ -20,6 +20,7 @@ import { appendRugPullSample, computeRugPullRisk } from "./rugpull.js";
 import { loadState, saveState } from "./state.js";
 import { sleep, nowMs, pctChange } from "./utils.js";
 import { startServer } from "./server.js";
+import { TOKEN_PROGRAM_ID } from "@solana/spl-token";
 
 const SOL_MINT = "So11111111111111111111111111111111111111112";
 const USDC_MINT = "EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v";
@@ -940,6 +941,93 @@ async function shouldExtendHold(position) {
   return signal.trend;
 }
 
+async function getWalletTokenBalances(connection, owner) {
+  const resp = await connection.getParsedTokenAccountsByOwner(owner, { programId: TOKEN_PROGRAM_ID }, "confirmed");
+  return resp.value
+    .map((account) => {
+      const info = account.account.data.parsed.info;
+      const amount = info.tokenAmount;
+      return {
+        mint: info.mint,
+        amountRaw: BigInt(amount.amount || "0"),
+        amountUi: amount.uiAmount || 0,
+        decimals: amount.decimals ?? 0,
+      };
+    })
+    .filter((token) => token.amountRaw > 0n);
+}
+
+async function reconcilePositionWithChain(connection, state, keypair) {
+  if (config.simulatorMode) return;
+  const active = state.position;
+  const owner = keypair.publicKey;
+
+  if (active) {
+    const balanceRaw = await getTokenBalanceRaw(connection, owner, new PublicKey(active.mint));
+    if (balanceRaw <= 0n) {
+      pushLog(
+        "warn",
+        `State position mismatch: ${active.mint} missing on-chain balance. Resetting stored position.`
+      );
+      state.position = null;
+      saveState(state);
+      return;
+    }
+
+    const decimals = Number.isFinite(active.tokenDecimals) ? active.tokenDecimals : 0;
+    const amountUi = Number(balanceRaw) / 10 ** decimals;
+    if (Math.abs((active.tokenAmount || 0) - amountUi) > 0) {
+      pushLog(
+        "warn",
+        `State position mismatch: updating ${active.mint} amount to ${amountUi.toFixed(6)} from on-chain balance.`
+      );
+      active.tokenAmount = amountUi;
+      active.tokenDecimals = decimals;
+      state.position = active;
+      saveState(state);
+    }
+    return;
+  }
+
+  const onChainBalances = await getWalletTokenBalances(connection, owner);
+  if (!onChainBalances.length) return;
+
+  const sorted = [...onChainBalances].sort((a, b) => Number(b.amountRaw - a.amountRaw));
+  const candidate = sorted[0];
+  pushLog(
+    "warn",
+    `On-chain token balance detected for ${candidate.mint} while state.position is empty. Rebuilding position.`
+  );
+
+  const rebuilt = {
+    signature: "reconciled-startup",
+    mint: candidate.mint,
+    tokenAmount: candidate.amountUi,
+    tokenDecimals: candidate.decimals,
+    entryTimeMs: nowMs(),
+    entrySol: 0,
+    reconciled: true,
+    requiresManualExit: currentMode === "sharp",
+  };
+
+  try {
+    const valuation = await estimateTokenValueSol(rebuilt);
+    rebuilt.entrySol = valuation.outSol;
+  } catch (err) {
+    pushLog("warn", `Unable to value reconciled position for ${candidate.mint}: ${err?.message || err}`);
+  }
+
+  if (rebuilt.requiresManualExit) {
+    pushLog(
+      "warn",
+      "Sharp mode safeguard: auto-sell is disabled for reconciled positions until manual confirmation."
+    );
+  }
+
+  state.position = rebuilt;
+  saveState(state);
+}
+
 async function run() {
   requireConfig();
   const connection = createConnection(config.rpcUrl);
@@ -975,6 +1063,10 @@ async function run() {
       saveState(state);
       pushLog("info", `Simulator balance initialized to ${state.simBalanceSol.toFixed(4)} SOL.`);
     }
+  }
+
+  if (!isSimulator && keypair) {
+    await reconcilePositionWithChain(connection, state, keypair);
   }
 
   const requestManualExit = () => {
@@ -1047,6 +1139,7 @@ async function run() {
         const heldMinutes = (now - position.entryTimeMs) / 60000;
         const timeStopHit = heldMinutes >= config.exitHardMinutes;
         const softStopHit = heldMinutes >= config.exitSoftMinutes;
+        const autoExitAllowed = !position.requiresManualExit || manualExitRequested || isSimulator;
 
         let outSol = null;
         let pnlPct = null;
@@ -1084,6 +1177,13 @@ async function run() {
           continue;
         }
 
+        if (!autoExitAllowed && !position.manualExitWarnedAt) {
+          pushLog("warn", "Auto-sell blocked in sharp mode. Use manual sell to exit this position.");
+          position.manualExitWarnedAt = nowMs();
+          state.position = position;
+          saveState(state);
+        }
+
         if (shouldUpdateUi) {
           const valuation = await estimateTokenValueSol(position);
           outSol = valuation.outSol;
@@ -1106,7 +1206,7 @@ async function run() {
           lastUiUpdateMs = now;
         }
 
-        if (totalValueUsd !== null && totalValueUsd <= config.accountStopUsd) {
+        if (autoExitAllowed && totalValueUsd !== null && totalValueUsd <= config.accountStopUsd) {
           pushLog("warn", "Account stop triggered. Exiting.");
           const sig = await exitPosition(connection, keypair, position);
           pushLog("info", `Exit tx: ${sig}`);
@@ -1130,7 +1230,7 @@ async function run() {
           continue;
         }
 
-        if (pnlPct !== null && pnlPct <= -config.stopLossPct * 100) {
+        if (autoExitAllowed && pnlPct !== null && pnlPct <= -config.stopLossPct * 100) {
           pushLog("warn", "Stop loss triggered. Exiting.");
           const sig = await exitPosition(connection, keypair, position);
           pushLog("info", `Exit tx: ${sig}`);
@@ -1154,7 +1254,7 @@ async function run() {
           continue;
         }
 
-        if (pnlPct !== null && profitUsd !== null && shouldTakeProfit(pnlPct, profitUsd)) {
+        if (autoExitAllowed && pnlPct !== null && profitUsd !== null && shouldTakeProfit(pnlPct, profitUsd)) {
           pushLog("info", "Take profit triggered. Exiting.");
           const sig = await exitPosition(connection, keypair, position);
           pushLog("info", `Exit tx: ${sig}`);
@@ -1178,7 +1278,7 @@ async function run() {
           continue;
         }
 
-        if (timeStopHit) {
+        if (autoExitAllowed && timeStopHit) {
           pushLog("info", "Hard time stop. Exiting.");
           const sig = await exitPosition(connection, keypair, position);
           pushLog("info", `Exit tx: ${sig}`);
@@ -1202,7 +1302,7 @@ async function run() {
           continue;
         }
 
-        if (softStopHit && shouldUpdateUi) {
+        if (autoExitAllowed && softStopHit && shouldUpdateUi) {
           const canExtend = pnlPct !== null && pnlPct >= config.minProfitToExtendPct && (await shouldExtendHold(position));
           if (!canExtend) {
             pushLog("info", "Soft time stop. Exiting.");
