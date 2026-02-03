@@ -27,6 +27,7 @@ RPC_URL=...
 BIRDEYE_API_KEY=...
 JUP_API_KEY=...
 KEYPAIR_PATH=path/to/your/keypair.json
+UI_API_KEY=your-shared-secret
 ```
 
 ## Run
@@ -36,6 +37,13 @@ npm start
 ```
 
 Open the dashboard at `http://localhost:8787` (or whatever `PORT` you set).
+
+### UI API authentication (POST endpoints)
+Set `UI_API_KEY` to require authentication for the UI POST endpoints (`/api/sell-now`, `/api/reset-cooldown`, `/api/mode`). Provide the key via either:
+- `X-API-KEY: <your key>` header, or
+- `Authorization: Bearer <your key>` header.
+
+Requests without a key receive a 401, and invalid keys receive a 403.
 
 ## Training dataset builder
 

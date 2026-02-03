@@ -12,8 +12,31 @@ export function startServer({ port, host, onSellNow, onResetCooldown, onSetMode 
   const app = express();
   app.use(express.static(publicDir));
   app.use(express.json());
+  const apiKey = process.env.UI_API_KEY;
 
-  app.post("/api/sell-now", async (req, res) => {
+  const requireApiKey = (req, res, next) => {
+    if (!apiKey) {
+      return next();
+    }
+    const headerKey = req.get("x-api-key");
+    const authHeader = req.get("authorization");
+    const bearerToken = authHeader?.startsWith("Bearer ")
+      ? authHeader.slice("Bearer ".length).trim()
+      : null;
+    const token = headerKey || bearerToken;
+
+    if (!token) {
+      res.status(401).json({ ok: false, error: "missing_api_key" });
+      return;
+    }
+    if (token !== apiKey) {
+      res.status(403).json({ ok: false, error: "invalid_api_key" });
+      return;
+    }
+    next();
+  };
+
+  app.post("/api/sell-now", requireApiKey, async (req, res) => {
     if (!onSellNow) {
       res.status(503).json({ ok: false, error: "manual_sell_unavailable" });
       return;
@@ -30,7 +53,7 @@ export function startServer({ port, host, onSellNow, onResetCooldown, onSetMode 
     }
   });
 
-  app.post("/api/reset-cooldown", async (req, res) => {
+  app.post("/api/reset-cooldown", requireApiKey, async (req, res) => {
     if (!onResetCooldown) {
       res.status(503).json({ ok: false, error: "reset_cooldown_unavailable" });
       return;
@@ -47,7 +70,7 @@ export function startServer({ port, host, onSellNow, onResetCooldown, onSetMode 
     }
   });
 
-  app.post("/api/mode", async (req, res) => {
+  app.post("/api/mode", requireApiKey, async (req, res) => {
     if (!onSetMode) {
       res.status(503).json({ ok: false, error: "mode_unavailable" });
       return;
