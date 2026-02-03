@@ -55,6 +55,9 @@ Open the dashboard at `http://localhost:8787` (or whatever `PORT` you set).
 ## Config
 See `.env.example` for parameters.
 
+## Training orchestration
+Use the orchestration layer to run ETL → training → evaluation → promotion and write the `models/latest.json` pointer consumed by the bot. See `docs/training.md` for setup and environment variables.
+
 ### Momentum mode (optional)
 Set `MOMENTUM_MODE=1` to rank candidates by recent price change (short + long lookback) instead of the RSI/EMA signal. Use the `MOMENTUM_*` settings in `.env.example` to tune the lookbacks, minimum % change, and weighting.
 
