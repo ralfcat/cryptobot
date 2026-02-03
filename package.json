@@ -9,7 +9,11 @@
     "start": "node src/index.js",
     "train:model": "node scripts/train_model.js",
     "orchestrate": "node src/orchestrator.js",
-    "test": "node --test"
+    "test": "node --test tests/unit/**/*.test.js tests/e2e/**/*.test.js",
+    "test:unit": "node --test tests/unit/**/*.test.js",
+    "test:e2e": "node --test tests/e2e/**/*.test.js",
+    "test:ui": "playwright test",
+    "test:all": "npm run test:unit && npm run test:e2e && npm run test:ui"
   },
   "dependencies": {
     "@solana/spl-token": "^0.4.8",
@@ -22,5 +26,8 @@
   },
   "optionalDependencies": {
     "parquetjs-lite": "^0.8.0"
+  },
+  "devDependencies": {
+    "@playwright/test": "^1.49.0"
   }
 }

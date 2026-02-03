@@ -1,3 +1,5 @@
+import { computeTradeStats, fmtNum, fmtPct, fmtTime, fmtUsd, seriesFromTrades } from "./ui-metrics.js";
+
 const el = (id) => document.getElementById(id);
 
 const statusText = el("status-text");
@@ -69,26 +71,6 @@ function updateModeControls(mode, { pending = false } = {}) {
       modeStatus.textContent = `Active: ${prettyMode(mode)}`;
     }
   }
-}
-
-function fmtUsd(v) {
-  if (v === null || v === undefined || Number.isNaN(v)) return "-";
-  return `$${Number(v).toFixed(2)}`;
-}
-
-function fmtNum(v, digits = 4) {
-  if (v === null || v === undefined || Number.isNaN(v)) return "-";
-  return Number(v).toFixed(digits);
-}
-
-function fmtPct(v, digits = 2) {
-  if (v === null || v === undefined || Number.isNaN(v)) return "-";
-  return `${Number(v).toFixed(digits)}%`;
-}
-
-function fmtTime(ms) {
-  if (!ms) return "-";
-  return new Date(ms).toLocaleTimeString();
 }
 
 function renderLogs(items) {
