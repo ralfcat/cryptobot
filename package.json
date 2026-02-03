@@ -7,6 +7,7 @@
   "main": "src/index.js",
   "scripts": {
     "start": "node src/index.js",
+    "train:model": "node scripts/train_model.js"
     "orchestrate": "node src/orchestrator.js"
   },
   "dependencies": {

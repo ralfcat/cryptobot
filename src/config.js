@@ -94,6 +94,10 @@ const config = {
   bollPeriod: num("BOLL_PERIOD", 20),
   bollStd: num("BOLL_STD", 2),
   minProfitToExtendPct: num("MIN_PROFIT_TO_EXTEND_PCT", 5),
+
+  modelPath: process.env.MODEL_PATH || "",
+  modelRefreshMs: num("MODEL_REFRESH_MS", 300000),
+  modelThreshold: num("MODEL_THRESHOLD", 0.6),
 };
 
 export default config;
