@@ -957,6 +957,44 @@ async function run() {
   state.simBalanceSol = ensureNumber(state.simBalanceSol, 0);
   state.simBalanceUsd = ensureNumber(state.simBalanceUsd, 0);
 
+  const recordExit = async ({
+    position,
+    reason,
+    logMessage,
+    logLevel = "info",
+    pnlPct,
+    profitUsd,
+    heldMinutes,
+    solUsdNow,
+    sig,
+    outSol,
+  }) => {
+    pushLog(logLevel, logMessage);
+    pushLog("info", `Exit tx: ${sig}`);
+    pushTrade({ side: "sell", mint: position.mint, pnlPct, profitUsd, sig, reason });
+    pushTrainingEvent(
+      buildTrainingEvent({
+        event: "exit",
+        side: "sell",
+        mint: position.mint,
+        sig,
+        pnlPct,
+        profitUsd,
+        heldMinutes,
+        decision: buildDecisionMetadata(reason, getCooldown(state)),
+        entrySnapshot: position.entrySnapshot ?? null,
+      })
+    );
+    setActivePosition(null);
+    state.lastExitTimeMs = nowMs();
+    if (isSimulator) {
+      state.simBalanceSol += outSol;
+      const resolvedSolUsd = solUsdNow ?? (await getSolUsdPriceCached());
+      state.simBalanceUsd = state.simBalanceSol * (resolvedSolUsd || 0);
+    }
+    saveState(state);
+  };
+
   const resolveSimulatorStartBalance = async () => {
     if (config.simulatorStartSol > 0) return config.simulatorStartSol;
     if (config.simulatorStartUsd > 0) {
@@ -1054,33 +1092,26 @@ async function run() {
         let totalValueUsd = null;
 
         if (manualExitRequested) {
-          pushLog("warn", "Manual sell triggered. Exiting now.");
           const valuation = await estimateTokenValueSol(position);
           outSol = valuation.outSol;
           pnlPct = pctChange(position.entrySol, outSol);
           const solUsdNow = solUsd ?? (await getSolUsdPriceCached());
           profitUsd = (outSol - position.entrySol) * solUsdNow;
-          const exitResult = await exitPosition(connection, keypair, position, { simulate: isSimulator });
           manualExitRequested = false;
-          pushLog("info", `Exit tx: ${sig}`);
-          pushTrade({ side: "sell", mint: position.mint, pnlPct, profitUsd, sig, reason: "manual" });
-          pushTrainingEvent(
-            buildTrainingEvent({
-              event: "exit",
-              side: "sell",
-              mint: position.mint,
-              sig,
-              pnlPct,
-              profitUsd,
-              heldMinutes,
-              decision: buildDecisionMetadata("manual", getCooldown(state)),
-              entrySnapshot: position.entrySnapshot ?? null,
-            })
-          );
-          state.position = null;
-          state.lastExitTimeMs = nowMs();
-          if (isSimulator) state.simBalanceUsd = state.simBalanceSol * (solUsdNow || 0);
-          saveState(state);
+          const { sig, outSol: realizedOutSol } = await exitPosition(connection, keypair, position);
+          await recordExit({
+            position,
+            reason: "manual",
+            logMessage: "Manual sell triggered. Exiting now.",
+            logLevel: "warn",
+            pnlPct,
+            profitUsd,
+            heldMinutes,
+            solUsdNow,
+            sig,
+            outSol: realizedOutSol,
+          });
+          outSol = realizedOutSol ?? outSol;
           continue;
         }
 
@@ -1107,124 +1138,89 @@ async function run() {
         }
 
         if (totalValueUsd !== null && totalValueUsd <= config.accountStopUsd) {
-          pushLog("warn", "Account stop triggered. Exiting.");
-          const sig = await exitPosition(connection, keypair, position);
-          pushLog("info", `Exit tx: ${sig}`);
-          pushTrade({ side: "sell", mint: position.mint, pnlPct, profitUsd, sig, reason: "account_stop" });
-          pushTrainingEvent(
-            buildTrainingEvent({
-              event: "exit",
-              side: "sell",
-              mint: position.mint,
-              sig,
-              pnlPct,
-              profitUsd,
-              heldMinutes,
-              decision: buildDecisionMetadata("account_stop", getCooldown(state)),
-              entrySnapshot: position.entrySnapshot ?? null,
-            })
-          );
-          state.position = null;
-          state.lastExitTimeMs = nowMs();
-          saveState(state);
+          const { sig, outSol: realizedOutSol } = await exitPosition(connection, keypair, position);
+          await recordExit({
+            position,
+            reason: "account_stop",
+            logMessage: "Account stop triggered. Exiting.",
+            logLevel: "warn",
+            pnlPct,
+            profitUsd,
+            heldMinutes,
+            solUsdNow: solUsd ?? null,
+            sig,
+            outSol: realizedOutSol,
+          });
           continue;
         }
 
         if (pnlPct !== null && pnlPct <= -config.stopLossPct * 100) {
-          pushLog("warn", "Stop loss triggered. Exiting.");
-          const sig = await exitPosition(connection, keypair, position);
-          pushLog("info", `Exit tx: ${sig}`);
-          pushTrade({ side: "sell", mint: position.mint, pnlPct, profitUsd, sig, reason: "stop_loss" });
-          pushTrainingEvent(
-            buildTrainingEvent({
-              event: "exit",
-              side: "sell",
-              mint: position.mint,
-              sig,
-              pnlPct,
-              profitUsd,
-              heldMinutes,
-              decision: buildDecisionMetadata("stop_loss", getCooldown(state)),
-              entrySnapshot: position.entrySnapshot ?? null,
-            })
-          );
-          state.position = null;
-          state.lastExitTimeMs = nowMs();
-          saveState(state);
+          const { sig, outSol: realizedOutSol } = await exitPosition(connection, keypair, position);
+          await recordExit({
+            position,
+            reason: "stop_loss",
+            logMessage: "Stop loss triggered. Exiting.",
+            logLevel: "warn",
+            pnlPct,
+            profitUsd,
+            heldMinutes,
+            solUsdNow: solUsd ?? null,
+            sig,
+            outSol: realizedOutSol,
+          });
           continue;
         }
 
         if (pnlPct !== null && profitUsd !== null && shouldTakeProfit(pnlPct, profitUsd)) {
-          pushLog("info", "Take profit triggered. Exiting.");
-          const sig = await exitPosition(connection, keypair, position);
-          pushLog("info", `Exit tx: ${sig}`);
-          pushTrade({ side: "sell", mint: position.mint, pnlPct, profitUsd, sig, reason: "take_profit" });
-          pushTrainingEvent(
-            buildTrainingEvent({
-              event: "exit",
-              side: "sell",
-              mint: position.mint,
-              sig,
-              pnlPct,
-              profitUsd,
-              heldMinutes,
-              decision: buildDecisionMetadata("take_profit", getCooldown(state)),
-              entrySnapshot: position.entrySnapshot ?? null,
-            })
-          );
-          state.position = null;
-          state.lastExitTimeMs = nowMs();
-          saveState(state);
+          const { sig, outSol: realizedOutSol } = await exitPosition(connection, keypair, position);
+          await recordExit({
+            position,
+            reason: "take_profit",
+            logMessage: "Take profit triggered. Exiting.",
+            logLevel: "info",
+            pnlPct,
+            profitUsd,
+            heldMinutes,
+            solUsdNow: solUsd ?? null,
+            sig,
+            outSol: realizedOutSol,
+          });
           continue;
         }
 
         if (timeStopHit) {
-          pushLog("info", "Hard time stop. Exiting.");
-          const sig = await exitPosition(connection, keypair, position);
-          pushLog("info", `Exit tx: ${sig}`);
-          pushTrade({ side: "sell", mint: position.mint, pnlPct, profitUsd, sig, reason: "hard_time" });
-          pushTrainingEvent(
-            buildTrainingEvent({
-              event: "exit",
-              side: "sell",
-              mint: position.mint,
-              sig,
-              pnlPct,
-              profitUsd,
-              heldMinutes,
-              decision: buildDecisionMetadata("hard_time", getCooldown(state)),
-              entrySnapshot: position.entrySnapshot ?? null,
-            })
-          );
-          state.position = null;
-          state.lastExitTimeMs = nowMs();
-          saveState(state);
+          const { sig, outSol: realizedOutSol } = await exitPosition(connection, keypair, position);
+          await recordExit({
+            position,
+            reason: "hard_time",
+            logMessage: "Hard time stop. Exiting.",
+            logLevel: "info",
+            pnlPct,
+            profitUsd,
+            heldMinutes,
+            solUsdNow: solUsd ?? null,
+            sig,
+            outSol: realizedOutSol,
+          });
           continue;
         }
 
         if (softStopHit && shouldUpdateUi) {
           const canExtend = pnlPct !== null && pnlPct >= config.minProfitToExtendPct && (await shouldExtendHold(position));
           if (!canExtend) {
-            pushLog("info", "Soft time stop. Exiting.");
-            const sig = await exitPosition(connection, keypair, position);
-            pushLog("info", `Exit tx: ${sig}`);
-            pushTrade({ side: "sell", mint: position.mint, pnlPct, profitUsd, sig, reason: "soft_time" });
-            pushTrainingEvent(
-              buildTrainingEvent({
-                event: "exit",
-                side: "sell",
-                mint: position.mint,
-                sig,
-                pnlPct,
-                profitUsd,
-                heldMinutes,
-                decision: buildDecisionMetadata("soft_time", getCooldown(state)),
-                entrySnapshot: position.entrySnapshot ?? null,
-              })
-            );
-            state.position = null;
-            state.lastExitTimeMs = nowMs();
-            saveState(state);
+            const { sig, outSol: realizedOutSol } = await exitPosition(connection, keypair, position);
+            await recordExit({
+              position,
+              reason: "soft_time",
+              logMessage: "Soft time stop. Exiting.",
+              logLevel: "info",
+              pnlPct,
+              profitUsd,
+              heldMinutes,
+              solUsdNow: solUsd ?? null,
+              sig,
+              outSol: realizedOutSol,
+            });
             continue;
           }
         }
