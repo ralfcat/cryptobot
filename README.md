@@ -55,6 +55,12 @@ Open the dashboard at `http://localhost:8787` (or whatever `PORT` you set).
 ## Config
 See `.env.example` for parameters.
 
+### Rug-pull tuning roadmap
+See `docs/rugpull_tuning.md` for the phased plan to collect data, label rug events, and tune the simulator with open-source modeling tools.
+
+### Rug-pull modeling (Python)
+See `modeling/README.md` for the Python baseline used to train and score a rug-pull risk model from `rugpull_samples.jsonl`.
+
 ### Momentum mode (optional)
 Set `MOMENTUM_MODE=1` to rank candidates by recent price change (short + long lookback) instead of the RSI/EMA signal. Use the `MOMENTUM_*` settings in `.env.example` to tune the lookbacks, minimum % change, and weighting.
 

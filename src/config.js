@@ -68,6 +68,10 @@ const config = {
   flashWindowMinutes: num("FLASH_WINDOW_MINUTES", 15),
   minVolatilityPct: num("MIN_VOLATILITY_PCT", 3),
   volatilityWeight: num("VOLATILITY_WEIGHT", 2),
+  rugRiskMaxScore: num("RUG_RISK_MAX_SCORE", -1),
+  rugRiskWeight: num("RUG_RISK_WEIGHT", 0),
+  rugRiskHoldersPct: num("RUG_RISK_HOLDERS_PCT", 35),
+  rugSampleLog: bool("RUG_SAMPLE_LOG", true),
 
   momentumMode: bool("MOMENTUM_MODE", false),
   momentumShortMinutes: num("MOMENTUM_SHORT_MINUTES", 15),

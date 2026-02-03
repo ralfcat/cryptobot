@@ -16,6 +16,7 @@ import { getTrendingTokens, getOHLCV, getTokenOverview, getTokenSecurity } from 
 import { getLatestBoosts, getLatestProfiles, getTokenPairs } from "./dexscreener.js";
 import { computeMomentum, computeSignal, computeVolatility, normalizeCandles, volumeLastMinutes } from "./strategy.js";
 import { getQuote, getSwapTx, getPriceImpactPct } from "./jupiter.js";
+import { appendRugPullSample, computeRugPullRisk } from "./rugpull.js";
 import { loadState, saveState } from "./state.js";
 import { sleep, nowMs, pctChange } from "./utils.js";
 import { startServer } from "./server.js";
@@ -246,6 +247,7 @@ async function pickCandidateBirdeye(connection, tradeLamports) {
     signalFail: 0,
     momentumFail: 0,
     priceImpactHigh: 0,
+    rugRiskHigh: 0,
   };
 
   for (const item of scanList) {
@@ -310,6 +312,7 @@ async function pickCandidateBirdeye(connection, tradeLamports) {
       continue;
     }
 
+    let holdersPct = null;
     if (config.maxTop10Pct > 0 && config.maxTop10Pct < 100 && !holdersCheckUnavailable) {
       const holders = await getTopHoldersPct(connection, mintPub, 10);
       if (holders.error) {
@@ -326,9 +329,12 @@ async function pickCandidateBirdeye(connection, tradeLamports) {
           stats.holdersError += 1;
           continue;
         }
-      } else if (holders.pct !== null && holders.pct > config.maxTop10Pct) {
-        stats.holdersTooHigh += 1;
-        continue;
+      } else {
+        holdersPct = holders.pct;
+        if (holders.pct !== null && holders.pct > config.maxTop10Pct) {
+          stats.holdersTooHigh += 1;
+          continue;
+        }
       }
     }
 
@@ -390,18 +396,38 @@ async function pickCandidateBirdeye(connection, tradeLamports) {
       continue;
     }
 
+    const rugRisk = computeRugPullRisk({ overview, security, mintInfo, holdersPct });
+    if (config.rugRiskMaxScore >= 0 && rugRisk.score > config.rugRiskMaxScore) {
+      stats.rugRiskHigh += 1;
+      continue;
+    }
+
     const baseScore = config.momentumMode ? momentum?.score ?? 0 : signal?.score ?? 0;
     const volatilityScore = config.volatilityWeight * volatility.rangePct + volatility.chopPct;
+    const rugRiskPenalty = Math.max(0, config.rugRiskWeight || 0) * rugRisk.score;
     const score =
       baseScore +
       volatilityScore +
-      (priceImpactPct !== null ? (config.maxPriceImpactPct - priceImpactPct) / 2 : 0);
+      (priceImpactPct !== null ? (config.maxPriceImpactPct - priceImpactPct) / 2 : 0) -
+      rugRiskPenalty;
 
     const targetList = entryOk
       ? candidates
       : config.momentumMode && momentumRelaxedOk
         ? relaxedCandidates
         : volatilityOnlyCandidates;
+    appendRugPullSample({
+      source: "birdeye",
+      address,
+      name,
+      entryOk,
+      score,
+      rugRisk,
+      priceImpactPct,
+      signal,
+      momentum,
+      volatility,
+    });
     targetList.push({
       address,
       name,
@@ -411,6 +437,7 @@ async function pickCandidateBirdeye(connection, tradeLamports) {
       momentum,
       volatility,
       priceImpactPct,
+      rugRisk,
     });
   }
 
@@ -434,7 +461,7 @@ async function pickCandidateBirdeye(connection, tradeLamports) {
   } else {
     pushLog(
       "warn",
-      `Filter stats: total ${stats.total} | lowLiq ${stats.liquidityLow} lowVol24 ${stats.vol24hLow} lowVol15 ${stats.vol15mLow} lowVol ${stats.volatilityLow} badVol ${stats.volatilityBad} sigFail ${stats.signalFail} momFail ${stats.momentumFail} impact ${stats.priceImpactHigh} auth ${stats.authority} holders ${stats.holdersTooHigh} ohlcv ${stats.ohlcvShort}`
+      `Filter stats: total ${stats.total} | lowLiq ${stats.liquidityLow} lowVol24 ${stats.vol24hLow} lowVol15 ${stats.vol15mLow} lowVol ${stats.volatilityLow} badVol ${stats.volatilityBad} sigFail ${stats.signalFail} momFail ${stats.momentumFail} impact ${stats.priceImpactHigh} rugRisk ${stats.rugRiskHigh} auth ${stats.authority} holders ${stats.holdersTooHigh} ohlcv ${stats.ohlcvShort}`
     );
   }
   return null;
@@ -532,6 +559,7 @@ async function pickCandidateDex(connection, tradeLamports) {
     holdersError: 0,
     invalidMint: 0,
     priceImpactHigh: 0,
+    rugRiskHigh: 0,
   };
 
   for (const [address, pair] of bestByToken.entries()) {
@@ -580,6 +608,7 @@ async function pickCandidateDex(connection, tradeLamports) {
       continue;
     }
 
+    let holdersPct = null;
     if (config.maxTop10Pct > 0 && config.maxTop10Pct < 100 && !holdersCheckUnavailable) {
       const holders = await getTopHoldersPct(connection, mintPub, 10);
       if (holders.error) {
@@ -592,9 +621,12 @@ async function pickCandidateDex(connection, tradeLamports) {
           stats.holdersError += 1;
           continue;
         }
-      } else if (holders.pct !== null && holders.pct > config.maxTop10Pct) {
-        stats.holdersTooHigh += 1;
-        continue;
+      } else {
+        holdersPct = holders.pct;
+        if (holders.pct !== null && holders.pct > config.maxTop10Pct) {
+          stats.holdersTooHigh += 1;
+          continue;
+        }
       }
     }
 
@@ -612,14 +644,26 @@ async function pickCandidateDex(connection, tradeLamports) {
       continue;
     }
 
+    const overview = {
+      liquidityUSD: liquidityUsd,
+      volume24hUSD: vol24hUsd,
+    };
+    const rugRisk = computeRugPullRisk({ overview, mintInfo, holdersPct });
+    if (config.rugRiskMaxScore >= 0 && rugRisk.score > config.rugRiskMaxScore) {
+      stats.rugRiskHigh += 1;
+      continue;
+    }
+
     const baseScore = priceChangePct ?? 0;
     const volScore = Math.log10((vol24hUsd || 0) + 1) * 2;
     const liqScore = Math.log10((liquidityUsd || 0) + 1);
+    const rugRiskPenalty = Math.max(0, config.rugRiskWeight || 0) * rugRisk.score;
     const score =
       baseScore +
       volScore +
       liqScore +
-      (priceImpactPct !== null ? (config.maxPriceImpactPct - priceImpactPct) / 2 : 0);
+      (priceImpactPct !== null ? (config.maxPriceImpactPct - priceImpactPct) / 2 : 0) -
+      rugRiskPenalty;
 
     const volatility = priceChangePct === null ? null : { ok: true, rangePct: Math.abs(priceChangePct), chopPct: 0 };
     const signal = config.momentumMode ? null : { ok: true, score: baseScore };
@@ -637,6 +681,19 @@ async function pickCandidateDex(connection, tradeLamports) {
       volatility,
       priceImpactPct,
       dexPair: pair,
+      rugRisk,
+    });
+    appendRugPullSample({
+      source: "dexscreener",
+      address,
+      name,
+      entryOk: true,
+      score,
+      rugRisk,
+      priceImpactPct,
+      signal,
+      momentum,
+      volatility,
     });
   }
 
@@ -645,7 +702,7 @@ async function pickCandidateDex(connection, tradeLamports) {
 
   pushLog(
     "warn",
-    `DexScreener filter stats: total ${stats.total} | lowLiq ${stats.liquidityLow} lowVol24 ${stats.vol24hLow} lowVol15 ${stats.vol15mLow} lowChange ${stats.priceChangeLow} impact ${stats.priceImpactHigh} auth ${stats.authority} holders ${stats.holdersTooHigh}`
+    `DexScreener filter stats: total ${stats.total} | lowLiq ${stats.liquidityLow} lowVol24 ${stats.vol24hLow} lowVol15 ${stats.vol15mLow} lowChange ${stats.priceChangeLow} impact ${stats.priceImpactHigh} rugRisk ${stats.rugRiskHigh} auth ${stats.authority} holders ${stats.holdersTooHigh}`
   );
   return null;
 }
