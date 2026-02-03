@@ -54,7 +54,8 @@ function parseMode(value) {
   return VALID_MODES.has(mode) ? mode : null;
 }
 
-let currentMode = normalizeMode(config.mode);
+const initialMode = config.simulatorMode ? "simulator" : config.mode;
+let currentMode = normalizeMode(initialMode);
 
 const ui = {
   status: "starting",
@@ -968,8 +969,7 @@ async function run() {
   initMetrics();
   const connection = createConnection(config.rpcUrl);
   const state = loadState();
-  const isSimulator = config.simulatorMode;
-  const keypair = isSimulator ? null : loadKeypair();
+  let keypair = null;
 
   const getActivePositions = () => (isSimulator ? state.simPositions : state.positions);
   const setActivePositions = (value) => {
@@ -998,16 +998,18 @@ async function run() {
     return 0;
   };
 
-  if (isSimulator && state.simBalanceSol <= 0) {
+  const ensureSimulatorBalance = async () => {
+    if (!isSimulatorMode() || state.simBalanceSol > 0) return;
     const startSol = await resolveSimulatorStartBalance();
-    if (startSol > 0) {
-      state.simBalanceSol = startSol;
-      const solUsd = await getSolUsdPriceCached();
-      state.simBalanceUsd = state.simBalanceSol * solUsd;
-      saveState(state);
-      pushLog("info", `Simulator balance initialized to ${state.simBalanceSol.toFixed(4)} SOL.`);
-    }
-  }
+    if (startSol <= 0) return;
+    state.simBalanceSol = startSol;
+    const solUsd = await getSolUsdPriceCached();
+    state.simBalanceUsd = state.simBalanceSol * solUsd;
+    saveState(state);
+    pushLog("info", `Simulator balance initialized to ${state.simBalanceSol.toFixed(4)} SOL.`);
+  };
+
+  await ensureSimulatorBalance();
 
   const requestManualExit = () => {
     if (!getActivePositions().length) return { ok: false, error: "no_position" };
@@ -1072,6 +1074,8 @@ async function run() {
   while (true) {
     try {
       const now = nowMs();
+      await ensureSimulatorBalance();
+      const simulatorActive = isSimulatorMode();
       const cooldown = getCooldown(state);
       const shouldUpdateUi = now - lastUiUpdateMs >= config.uiRefreshSeconds * 1000;
       const positions = getActivePositions();
