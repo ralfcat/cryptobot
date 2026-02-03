@@ -8,7 +8,7 @@ const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
 const publicDir = path.join(__dirname, "..", "public");
 
-export function startServer({ port, host, onSellNow, onResetCooldown }) {
+export function startServer({ port, host, onSellNow, onResetCooldown, onSetSimBalance }) {
   const app = express();
   app.use(express.static(publicDir));
   app.use(express.json());
@@ -37,6 +37,23 @@ export function startServer({ port, host, onSellNow, onResetCooldown }) {
     }
     try {
       const result = await onResetCooldown();
+      if (result?.ok === false) {
+        res.status(409).json(result);
+        return;
+      }
+      res.json({ ok: true, ...result });
+    } catch (err) {
+      res.status(500).json({ ok: false, error: err?.message || String(err) });
+    }
+  });
+
+  app.post("/api/sim-balance", async (req, res) => {
+    if (!onSetSimBalance) {
+      res.status(503).json({ ok: false, error: "sim_balance_unavailable" });
+      return;
+    }
+    try {
+      const result = await onSetSimBalance(req.body || {});
       if (result?.ok === false) {
         res.status(409).json(result);
         return;
