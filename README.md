@@ -88,24 +88,11 @@ docker compose up --build
 ## Config
 See `.env.example` for parameters.
 
-### Simulator mode (paper trading)
-Set `SIMULATOR_MODE=1` to run the bot without sending on-chain swaps. The scanner and strategy logic are identical, but balances and positions are stored in `state.json` under `simBalanceSol`/`simPosition`. In simulator mode you can omit wallet secrets because swaps are never signed.
+### Rug-pull tuning roadmap
+See `docs/rugpull_tuning.md` for the phased plan to collect data, label rug events, and tune the simulator with open-source modeling tools.
 
-Configure a starting balance with either `SIMULATOR_START_SOL` (preferred) or `SIMULATOR_START_USD`. If both are set, the SOL value is used. `SIMULATOR_FEE_BUFFER_SOL` mirrors `FEE_BUFFER_SOL` for the paper wallet. You can also change the in-memory balance while the bot is running by posting to:
-
-```
-POST /api/sim-balance
-{ "sol": 1.25 }
-```
-
-Or reset to the configured start balance with:
-
-```
-POST /api/sim-balance
-{ "reset": true }
-```
-## Training orchestration
-Use the orchestration layer to run ETL → training → evaluation → promotion and write the `models/latest.json` pointer consumed by the bot. See `docs/training.md` for setup and environment variables.
+### Rug-pull modeling (Python)
+See `modeling/README.md` for the Python baseline used to train and score a rug-pull risk model from `rugpull_samples.jsonl`.
 
 ### Momentum mode (optional)
 Set `MOMENTUM_MODE=1` to rank candidates by recent price change (short + long lookback) instead of the RSI/EMA signal. Use the `MOMENTUM_*` settings in `.env.example` to tune the lookbacks, minimum % change, and weighting.
