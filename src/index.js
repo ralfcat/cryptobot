@@ -1051,6 +1051,10 @@ async function run() {
 
   await ensureSimulatorBalance();
 
+  if (!isSimulator && keypair) {
+    await reconcilePositionWithChain(connection, state, keypair);
+  }
+
   const requestManualExit = () => {
     if (!getActivePositions().length) return { ok: false, error: "no_position" };
     if (manualExitRequested) {
