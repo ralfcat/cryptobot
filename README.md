@@ -58,6 +58,14 @@ node training/build_dataset.js --windows 5,15,60 --pnl-window-hours 24 --out dat
 
 To enable Parquet output, install `parquetjs-lite` (network restrictions may require vendoring it). If the dependency is unavailable, the builder falls back to `train.jsonl` and reports the failure.
 
+## End-to-end training + promotion flow
+
+1. **Collect events and trades**: The bot records `training_events.jsonl` (feature snapshots) and `trades.jsonl` (executed trades with PnL).
+2. **ETL + dataset build**: `src/orchestrator.js` runs `training/build_dataset.js` to create a versioned dataset under `data/etl/{runId}`. It then converts the output into `training_dataset.json` containing `{ timestamp, label, features }` rows.
+3. **Model training**: The orchestrator shells out to `scripts/train_model.js`, which trains a lightweight logistic model and writes artifacts into `models/` (model JSON + metadata).
+4. **Evaluation + promotion**: The orchestrator records evaluation metrics, checks promotion thresholds, and on success updates `models/latest.json` with a pointer to the promoted model file.
+5. **Trading inference**: `src/strategy.js` loads `models/latest.json`, resolves the referenced model artifact, and uses it for scoring during live trading.
+
 ## Core rules implemented
 - **All-in trade** using available SOL minus a small fee buffer.
 - **Stop loss** at -20%.

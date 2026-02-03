@@ -4,8 +4,10 @@ import config from "./config.js";
 import { avg, pctChange, sum } from "./utils.js";
 import { bollinger, emaSeries, lastEma, rsi } from "./indicators.js";
 
+const defaultPointerPath = path.resolve(process.cwd(), "models", "latest.json");
 const modelState = {
-  path: config.modelPath ? path.resolve(process.cwd(), config.modelPath) : "",
+  pointerPath: config.modelPath ? path.resolve(process.cwd(), config.modelPath) : defaultPointerPath,
+  resolvedPath: "",
   loadedAt: null,
   model: null,
   lastError: null,
@@ -25,18 +27,61 @@ function isValidModel(model) {
   );
 }
 
+function resolveModelPath(pointerPath, parsed) {
+  if (isValidModel(parsed)) {
+    return { modelPath: pointerPath, model: parsed };
+  }
+  const candidatePath = parsed?.modelPath;
+  if (candidatePath) {
+    return {
+      modelPath: path.isAbsolute(candidatePath)
+        ? candidatePath
+        : path.resolve(path.dirname(pointerPath), candidatePath),
+      model: null,
+    };
+  }
+  const metadataPath = parsed?.metadataPath;
+  if (metadataPath) {
+    const resolvedMetadataPath = path.isAbsolute(metadataPath)
+      ? metadataPath
+      : path.resolve(path.dirname(pointerPath), metadataPath);
+    const metadataRaw = fs.readFileSync(resolvedMetadataPath, "utf8");
+    const metadata = JSON.parse(metadataRaw);
+    if (metadata?.modelPath) {
+      return {
+        modelPath: path.isAbsolute(metadata.modelPath)
+          ? metadata.modelPath
+          : path.resolve(path.dirname(resolvedMetadataPath), metadata.modelPath),
+        model: null,
+      };
+    }
+  }
+  throw new Error("Model pointer missing modelPath.");
+}
+
 function loadModel() {
-  if (!modelState.path) return null;
+  if (!modelState.pointerPath) return null;
   try {
-    const raw = fs.readFileSync(modelState.path, "utf8");
+    const raw = fs.readFileSync(modelState.pointerPath, "utf8");
     const parsed = JSON.parse(raw);
-    if (!isValidModel(parsed)) {
+    const resolved = resolveModelPath(modelState.pointerPath, parsed);
+    if (resolved.model) {
+      modelState.model = resolved.model;
+      modelState.resolvedPath = resolved.modelPath;
+      modelState.loadedAt = Date.now();
+      modelState.lastError = null;
+      return resolved.model;
+    }
+    const modelRaw = fs.readFileSync(resolved.modelPath, "utf8");
+    const modelParsed = JSON.parse(modelRaw);
+    if (!isValidModel(modelParsed)) {
       throw new Error("Model file missing required fields.");
     }
-    modelState.model = parsed;
+    modelState.model = modelParsed;
+    modelState.resolvedPath = resolved.modelPath;
     modelState.loadedAt = Date.now();
     modelState.lastError = null;
-    return parsed;
+    return modelParsed;
   } catch (err) {
     modelState.lastError = err instanceof Error ? err.message : String(err);
     return null;
@@ -44,7 +89,7 @@ function loadModel() {
 }
 
 function scheduleModelRefresh() {
-  if (!modelState.path) return;
+  if (!modelState.pointerPath) return;
   loadModel();
   if (config.modelRefreshMs <= 0) return;
   const timer = setInterval(() => {
