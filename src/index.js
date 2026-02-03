@@ -980,6 +980,12 @@ async function run() {
   const ensureNumber = (value, fallback = 0) => (Number.isFinite(value) ? value : fallback);
   state.simBalanceSol = ensureNumber(state.simBalanceSol, 0);
   state.simBalanceUsd = ensureNumber(state.simBalanceUsd, 0);
+  const applySimExit = (outSol, solUsdNow) => {
+    if (!isSimulator) return;
+    const updatedSol = ensureNumber(state.simBalanceSol, 0) + ensureNumber(outSol, 0);
+    state.simBalanceSol = Math.max(0, updatedSol);
+    state.simBalanceUsd = state.simBalanceSol * ensureNumber(solUsdNow, 0);
+  };
 
   const normalizedPositions = getActivePositions().map((pos, idx) => ({
     ...pos,
