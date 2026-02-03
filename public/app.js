@@ -22,6 +22,9 @@ const sellNowBtn = el("sell-now");
 const sellStatus = el("sell-status");
 const resetCooldownBtn = el("reset-cooldown");
 const resetStatus = el("reset-status");
+const modeSharpBtn = el("mode-sharp");
+const modeSimulatorBtn = el("mode-simulator");
+const modeStatus = el("mode-status");
 const statTrades = el("stat-trades");
 const statWinrate = el("stat-winrate");
 const statTotalPnl = el("stat-totalpnl");
@@ -33,6 +36,30 @@ const pnlChart = el("pnl-chart");
 let latestPayload = null;
 let sellBusy = false;
 let resetBusy = false;
+let modeBusy = false;
+
+function prettyMode(mode) {
+  if (!mode) return "-";
+  return mode === "simulator" ? "Simulator mode" : "Sharp-mode";
+}
+
+function updateModeControls(mode, { pending = false } = {}) {
+  if (modeSharpBtn) {
+    modeSharpBtn.classList.toggle("active", mode === "sharp");
+    modeSharpBtn.disabled = modeBusy;
+  }
+  if (modeSimulatorBtn) {
+    modeSimulatorBtn.classList.toggle("active", mode === "simulator");
+    modeSimulatorBtn.disabled = modeBusy;
+  }
+  if (modeStatus) {
+    if (pending) {
+      modeStatus.textContent = `Updating: ${prettyMode(mode)}`;
+    } else {
+      modeStatus.textContent = `Active: ${prettyMode(mode)}`;
+    }
+  }
+}
 
 function fmtUsd(v) {
   if (v === null || v === undefined || Number.isNaN(v)) return "-";
@@ -273,6 +300,7 @@ function update(payload) {
   renderLogs(payload.logs || []);
   renderTrades(payload.trades || []);
   renderPerformance(payload.trades || []);
+  updateModeControls(payload.mode);
 
   if (sellNowBtn) {
     const hasPosition = Boolean(payload.position);
@@ -296,6 +324,52 @@ function update(payload) {
       }
     }
   }
+}
+
+async function requestMode(nextMode) {
+  if (modeBusy || !nextMode) return;
+  const currentMode = latestPayload?.mode || "sharp";
+  if (nextMode === currentMode) return;
+  modeBusy = true;
+  updateModeControls(nextMode, { pending: true });
+  try {
+    const res = await fetch("/api/mode", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ mode: nextMode }),
+    });
+    let data = {};
+    try {
+      data = await res.json();
+    } catch {
+      data = {};
+    }
+    if (!res.ok || data.ok === false) {
+      const msg = data?.error || `HTTP ${res.status}`;
+      if (modeStatus) modeStatus.textContent = `Failed: ${msg}`;
+      updateModeControls(currentMode);
+      return;
+    }
+    const confirmedMode = data.mode || nextMode;
+    if (latestPayload) {
+      latestPayload.mode = confirmedMode;
+    }
+    updateModeControls(confirmedMode);
+  } catch (err) {
+    if (modeStatus) modeStatus.textContent = `Failed: ${err?.message || err}`;
+    updateModeControls(currentMode);
+  } finally {
+    modeBusy = false;
+    updateModeControls(latestPayload?.mode || nextMode);
+  }
+}
+
+if (modeSharpBtn) {
+  modeSharpBtn.addEventListener("click", () => requestMode("sharp"));
+}
+
+if (modeSimulatorBtn) {
+  modeSimulatorBtn.addEventListener("click", () => requestMode("simulator"));
 }
 
 async function requestSellNow() {

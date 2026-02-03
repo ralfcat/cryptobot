@@ -44,6 +44,7 @@ const config = {
 
   host: process.env.HOST || "0.0.0.0",
   port: num("PORT", 8787),
+  mode: (process.env.MODE || "sharp").toLowerCase(),
   uiRefreshSeconds: num("UI_REFRESH_SECONDS", 5),
   scanIntervalSeconds: num("SCAN_INTERVAL_SECONDS", 30),
 
