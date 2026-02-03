@@ -34,6 +34,16 @@ const statAvgPnl = el("stat-avgpnl");
 const statAvgHold = el("stat-avg-hold");
 const statBestWorst = el("stat-bestworst");
 const pnlChart = el("pnl-chart");
+const kpiNetPnl = el("kpi-net-pnl");
+const kpiWinRate = el("kpi-win-rate");
+const kpiDrawdown = el("kpi-drawdown");
+const kpiSharpe = el("kpi-sharpe");
+const anaProfitFactor = el("ana-profit-factor");
+const anaExpectancy = el("ana-expectancy");
+const anaVolatility = el("ana-volatility");
+const anaVelocity = el("ana-velocity");
+const anaSlippage = el("ana-slippage");
+const anaExposure = el("ana-exposure");
 
 let latestPayload = null;
 let sellBusy = false;
@@ -97,6 +107,109 @@ function renderTrades(items) {
       div.textContent = line;
       tradesEl.appendChild(div);
     });
+}
+
+function computeTradeStats(items) {
+  const trades = Array.isArray(items) ? items.slice().sort((a, b) => (a.t || 0) - (b.t || 0)) : [];
+  let closed = 0;
+  let wins = 0;
+  let totalPnlUsd = 0;
+  let totalPnlPct = 0;
+  let grossProfit = 0;
+  let grossLoss = 0;
+  const pnlPcts = [];
+  const slippages = [];
+  let best = null;
+  let worst = null;
+  const holds = [];
+  const lastBuyByMint = new Map();
+
+  for (const trade of trades) {
+    const side = String(trade.side || "").toLowerCase();
+    if (side === "buy") {
+      if (trade.mint) lastBuyByMint.set(trade.mint, trade);
+      continue;
+    }
+    if (side !== "sell") continue;
+    closed += 1;
+    const pnlUsd = Number(trade.profitUsd);
+    const pnlPct = Number(trade.pnlPct);
+    if (Number.isFinite(pnlUsd)) {
+      totalPnlUsd += pnlUsd;
+      if (pnlUsd > 0) wins += 1;
+      if (pnlUsd > 0) grossProfit += pnlUsd;
+      if (pnlUsd < 0) grossLoss += Math.abs(pnlUsd);
+    }
+    if (Number.isFinite(pnlPct)) {
+      totalPnlPct += pnlPct;
+      pnlPcts.push(pnlPct);
+      best = best === null ? pnlPct : Math.max(best, pnlPct);
+      worst = worst === null ? pnlPct : Math.min(worst, pnlPct);
+    }
+    if (Number.isFinite(trade.slippagePct)) {
+      slippages.push(Number(trade.slippagePct));
+    }
+    const buy = trade.mint ? lastBuyByMint.get(trade.mint) : null;
+    if (buy?.t && trade.t) {
+      holds.push((trade.t - buy.t) / 60000);
+      lastBuyByMint.delete(trade.mint);
+    }
+  }
+
+  const avgHold = holds.length ? holds.reduce((a, b) => a + b, 0) / holds.length : null;
+  const avgPnlPct = closed ? totalPnlPct / closed : null;
+  const winRate = closed ? wins / closed : null;
+  const profitFactor = grossLoss > 0 ? grossProfit / grossLoss : null;
+  const avgSlippage = slippages.length ? slippages.reduce((a, b) => a + b, 0) / slippages.length : null;
+
+  return {
+    closed,
+    winRate,
+    totalPnlUsd,
+    avgPnlPct,
+    avgHold,
+    best,
+    worst,
+    pnlPcts,
+    profitFactor,
+    avgSlippage,
+  };
+}
+
+function seriesFromTrades(items) {
+  const trades = Array.isArray(items) ? items.slice().sort((a, b) => (a.t || 0) - (b.t || 0)) : [];
+  const points = [];
+  let cumulative = 0;
+  for (const trade of trades) {
+    const side = String(trade.side || "").toLowerCase();
+    if (side !== "sell") continue;
+    const pnlUsd = Number(trade.profitUsd);
+    if (!Number.isFinite(pnlUsd)) continue;
+    cumulative += pnlUsd;
+    points.push({ t: trade.t || Date.now(), v: cumulative });
+  }
+  if (!points.length) {
+    points.push({ t: Date.now(), v: 0 });
+  }
+  return points;
+}
+
+function computeDrawdown(points) {
+  let peak = -Infinity;
+  let maxDrawdown = 0;
+  for (const point of points) {
+    if (point.v > peak) peak = point.v;
+    const dd = peak - point.v;
+    if (dd > maxDrawdown) maxDrawdown = dd;
+  }
+  return maxDrawdown;
+}
+
+function computeVolatility(pcts) {
+  if (!pcts.length) return null;
+  const mean = pcts.reduce((a, b) => a + b, 0) / pcts.length;
+  const variance = pcts.reduce((acc, v) => acc + (v - mean) ** 2, 0) / pcts.length;
+  return Math.sqrt(variance);
 }
 
 function drawPnlChart(canvas, points) {
@@ -180,6 +293,25 @@ function renderPerformance(items) {
 
   chartPoints = seriesFromTrades(items);
   drawPnlChart(pnlChart, chartPoints);
+
+  const drawdown = computeDrawdown(chartPoints);
+  const volatility = computeVolatility(stats.pnlPcts);
+  const sharpeProxy = volatility ? stats.avgPnlPct / volatility : null;
+  const now = Date.now();
+  const tradeVelocity = Array.isArray(items)
+    ? items.filter((trade) => trade?.side === "sell" && trade.t && now - trade.t < 24 * 60 * 60 * 1000).length
+    : 0;
+
+  if (kpiNetPnl) kpiNetPnl.textContent = fmtUsd(stats.totalPnlUsd);
+  if (kpiWinRate) kpiWinRate.textContent = stats.winRate === null ? "-" : fmtPct(stats.winRate * 100, 1);
+  if (kpiDrawdown) kpiDrawdown.textContent = fmtUsd(drawdown);
+  if (kpiSharpe) kpiSharpe.textContent = sharpeProxy === null ? "-" : fmtNum(sharpeProxy, 2);
+
+  if (anaProfitFactor) anaProfitFactor.textContent = stats.profitFactor === null ? "-" : fmtNum(stats.profitFactor, 2);
+  if (anaExpectancy) anaExpectancy.textContent = stats.closed ? fmtUsd(stats.totalPnlUsd / stats.closed) : "-";
+  if (anaVolatility) anaVolatility.textContent = volatility === null ? "-" : fmtPct(volatility, 2);
+  if (anaVelocity) anaVelocity.textContent = stats.closed ? String(tradeVelocity) : "-";
+  if (anaSlippage) anaSlippage.textContent = stats.avgSlippage === null ? "-" : fmtPct(stats.avgSlippage, 2);
 }
 
 function update(payload) {
@@ -216,6 +348,11 @@ function update(payload) {
   cooldown.textContent = cd.minutes ? `${fmtNum(cd.minutes, 0)} min` : "-";
   nextEntry.textContent = cd.nextEntryMs ? fmtTime(cd.nextEntryMs) : "-";
   lastUpdate.textContent = payload.updatedAt ? fmtTime(payload.updatedAt) : "-";
+
+  if (anaExposure) {
+    const exposure = pos?.estUsd && balances?.totalUsd ? (pos.estUsd / balances.totalUsd) * 100 : null;
+    anaExposure.textContent = exposure === null || !Number.isFinite(exposure) ? "-" : fmtPct(exposure, 1);
+  }
 
   renderLogs(payload.logs || []);
   renderTrades(payload.trades || []);
