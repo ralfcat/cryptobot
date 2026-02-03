@@ -16,6 +16,7 @@ import { getTrendingTokens, getOHLCV, getTokenOverview, getTokenSecurity } from 
 import { getLatestBoosts, getLatestProfiles, getTokenPairs } from "./dexscreener.js";
 import { computeMomentum, computeSignal, computeVolatility, normalizeCandles, volumeLastMinutes } from "./strategy.js";
 import { getQuote, getSwapTx, getPriceImpactPct } from "./jupiter.js";
+import { appendRugPullSample, computeRugPullRisk } from "./rugpull.js";
 import { loadState, saveState } from "./state.js";
 import { sleep, nowMs, pctChange } from "./utils.js";
 import { startServer } from "./server.js";
@@ -30,10 +31,26 @@ const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
 const tradesPath = path.join(__dirname, "..", "trades.jsonl");
 const tradesCsvPath = path.join(__dirname, "..", "trades.csv");
+const trainingEventsPath = path.join(__dirname, "..", "training_events.jsonl");
+
+const VALID_MODES = new Set(["sharp", "simulator"]);
+
+function normalizeMode(value) {
+  const mode = String(value || "").toLowerCase();
+  return VALID_MODES.has(mode) ? mode : "sharp";
+}
+
+function parseMode(value) {
+  const mode = String(value || "").toLowerCase();
+  return VALID_MODES.has(mode) ? mode : null;
+}
+
+let currentMode = normalizeMode(config.mode);
 
 const ui = {
   status: "starting",
   lastAction: "Starting bot",
+  mode: currentMode,
   balances: { sol: 0, solUsd: 0, totalUsd: 0 },
   position: null,
   rules: {
@@ -58,19 +75,27 @@ let manualExitRequested = false;
 let manualExitRequestedAt = 0;
 let birdeyeBlockedUntilMs = 0;
 
+function isSimulatorMode() {
+  return currentMode === "simulator";
+}
+
 function broadcastUi(patch = {}) {
-  Object.assign(ui, patch);
+  const next = { ...patch };
+  if (next.status) next.status = formatStatus(next.status);
+  Object.assign(ui, next);
   ui.updatedAt = nowMs();
   if (uiServer) uiServer.broadcast(ui);
 }
 
 function pushLog(level, msg) {
-  const entry = { t: nowMs(), level, msg };
+  const prefix = config.simulatorMode ? "[SIM] " : "";
+  const text = msg.startsWith(prefix) ? msg : `${prefix}${msg}`;
+  const entry = { t: nowMs(), level, msg: text };
   ui.logs.push(entry);
   if (ui.logs.length > 200) ui.logs.shift();
-  ui.lastAction = msg;
-  if (level === "error") console.error(msg);
-  else console.log(msg);
+  ui.lastAction = text;
+  if (level === "error") console.error(text);
+  else console.log(text);
   broadcastUi();
 }
 
@@ -81,6 +106,91 @@ function pushTrade(entry) {
   fs.appendFileSync(tradesPath, `${JSON.stringify(record)}\n`);
   appendTradeCsv(record);
   broadcastUi();
+}
+
+function pushTrainingEvent(entry) {
+  const record = { t: nowMs(), ...entry };
+  fs.appendFileSync(trainingEventsPath, `${JSON.stringify(record)}\n`);
+}
+
+function buildDecisionMetadata(reason, cooldown) {
+  return {
+    reason,
+    cooldown,
+    thresholds: {
+      stopLossPct: config.stopLossPct,
+      takeProfitPct: config.takeProfitPct,
+      takeProfitUsd: config.takeProfitUsd,
+      exitSoftMinutes: config.exitSoftMinutes,
+      exitHardMinutes: config.exitHardMinutes,
+      minProfitToExtendPct: config.minProfitToExtendPct,
+      rsiLow: config.rsiLow,
+      emaFast: config.emaFast,
+      emaSlow: config.emaSlow,
+      bollPeriod: config.bollPeriod,
+      bollStd: config.bollStd,
+      volSpikeMult: config.volSpikeMult,
+      minLiquidityUsd: config.minLiquidityUsd,
+      minVol24hUsd: config.minVol24hUsd,
+      minVol15mUsd: config.minVol15mUsd,
+      minVolatilityPct: config.minVolatilityPct,
+      maxPriceImpactPct: config.maxPriceImpactPct,
+      maxTop10Pct: config.maxTop10Pct,
+      momentumMode: config.momentumMode,
+      momentumMinPctShort: config.momentumMinPctShort,
+      momentumMinPctLong: config.momentumMinPctLong,
+      momentumWeightShort: config.momentumWeightShort,
+      momentumWeightLong: config.momentumWeightLong,
+      flashWindowMinutes: config.flashWindowMinutes,
+      dexPriceChangeWindow: config.dexPriceChangeWindow,
+      dexMinPriceChangePct: config.dexMinPriceChangePct,
+    },
+  };
+}
+
+function buildEntrySnapshot(candidate) {
+  if (!candidate) return null;
+  return {
+    provider: candidate.provider,
+    address: candidate.address,
+    name: candidate.name,
+    score: candidate.score,
+    signal: candidate.signal,
+    momentum: candidate.momentum,
+    volatility: candidate.volatility,
+    priceImpactPct: candidate.priceImpactPct,
+    liquidityUsd: candidate.liquidityUsd ?? null,
+    volume: {
+      vol24hUsd: candidate.vol24hUsd ?? null,
+      vol15mUsd: candidate.vol15mUsd ?? null,
+    },
+    holdersPct: candidate.holdersPct ?? null,
+    marketContext: candidate.marketContext ?? null,
+  };
+}
+
+function buildTrainingEvent({
+  event,
+  side,
+  mint,
+  sig,
+  pnlPct,
+  profitUsd,
+  heldMinutes,
+  decision,
+  entrySnapshot,
+}) {
+  return {
+    event,
+    side,
+    mint,
+    sig,
+    pnlPct,
+    profitUsd,
+    heldMinutes,
+    decision,
+    entrySnapshot,
+  };
 }
 
 function csvEscape(value) {
@@ -246,6 +356,7 @@ async function pickCandidateBirdeye(connection, tradeLamports) {
     signalFail: 0,
     momentumFail: 0,
     priceImpactHigh: 0,
+    rugRiskHigh: 0,
   };
 
   for (const item of scanList) {
@@ -264,6 +375,7 @@ async function pickCandidateBirdeye(connection, tradeLamports) {
 
     let overview = null;
     let security = null;
+    let holdersPct = null;
 
     try {
       overview = await getTokenOverview(address);
@@ -310,6 +422,7 @@ async function pickCandidateBirdeye(connection, tradeLamports) {
       continue;
     }
 
+    let holdersPct = null;
     if (config.maxTop10Pct > 0 && config.maxTop10Pct < 100 && !holdersCheckUnavailable) {
       const holders = await getTopHoldersPct(connection, mintPub, 10);
       if (holders.error) {
@@ -326,9 +439,12 @@ async function pickCandidateBirdeye(connection, tradeLamports) {
           stats.holdersError += 1;
           continue;
         }
-      } else if (holders.pct !== null && holders.pct > config.maxTop10Pct) {
-        stats.holdersTooHigh += 1;
-        continue;
+      } else {
+        holdersPct = holders.pct;
+        if (holders.pct !== null && holders.pct > config.maxTop10Pct) {
+          stats.holdersTooHigh += 1;
+          continue;
+        }
       }
     }
 
@@ -390,18 +506,38 @@ async function pickCandidateBirdeye(connection, tradeLamports) {
       continue;
     }
 
+    const rugRisk = computeRugPullRisk({ overview, security, mintInfo, holdersPct });
+    if (config.rugRiskMaxScore >= 0 && rugRisk.score > config.rugRiskMaxScore) {
+      stats.rugRiskHigh += 1;
+      continue;
+    }
+
     const baseScore = config.momentumMode ? momentum?.score ?? 0 : signal?.score ?? 0;
     const volatilityScore = config.volatilityWeight * volatility.rangePct + volatility.chopPct;
+    const rugRiskPenalty = Math.max(0, config.rugRiskWeight || 0) * rugRisk.score;
     const score =
       baseScore +
       volatilityScore +
-      (priceImpactPct !== null ? (config.maxPriceImpactPct - priceImpactPct) / 2 : 0);
+      (priceImpactPct !== null ? (config.maxPriceImpactPct - priceImpactPct) / 2 : 0) -
+      rugRiskPenalty;
 
     const targetList = entryOk
       ? candidates
       : config.momentumMode && momentumRelaxedOk
         ? relaxedCandidates
         : volatilityOnlyCandidates;
+    appendRugPullSample({
+      source: "birdeye",
+      address,
+      name,
+      entryOk,
+      score,
+      rugRisk,
+      priceImpactPct,
+      signal,
+      momentum,
+      volatility,
+    });
     targetList.push({
       address,
       name,
@@ -411,6 +547,7 @@ async function pickCandidateBirdeye(connection, tradeLamports) {
       momentum,
       volatility,
       priceImpactPct,
+      rugRisk,
     });
   }
 
@@ -434,7 +571,7 @@ async function pickCandidateBirdeye(connection, tradeLamports) {
   } else {
     pushLog(
       "warn",
-      `Filter stats: total ${stats.total} | lowLiq ${stats.liquidityLow} lowVol24 ${stats.vol24hLow} lowVol15 ${stats.vol15mLow} lowVol ${stats.volatilityLow} badVol ${stats.volatilityBad} sigFail ${stats.signalFail} momFail ${stats.momentumFail} impact ${stats.priceImpactHigh} auth ${stats.authority} holders ${stats.holdersTooHigh} ohlcv ${stats.ohlcvShort}`
+      `Filter stats: total ${stats.total} | lowLiq ${stats.liquidityLow} lowVol24 ${stats.vol24hLow} lowVol15 ${stats.vol15mLow} lowVol ${stats.volatilityLow} badVol ${stats.volatilityBad} sigFail ${stats.signalFail} momFail ${stats.momentumFail} impact ${stats.priceImpactHigh} rugRisk ${stats.rugRiskHigh} auth ${stats.authority} holders ${stats.holdersTooHigh} ohlcv ${stats.ohlcvShort}`
     );
   }
   return null;
@@ -532,6 +669,7 @@ async function pickCandidateDex(connection, tradeLamports) {
     holdersError: 0,
     invalidMint: 0,
     priceImpactHigh: 0,
+    rugRiskHigh: 0,
   };
 
   for (const [address, pair] of bestByToken.entries()) {
@@ -544,6 +682,7 @@ async function pickCandidateDex(connection, tradeLamports) {
     const liquidityUsd = Number(pair?.liquidity?.usd || 0);
     const vol24hUsd = Number(pair?.volume?.h24 || 0);
     const vol15mUsd = dexVolume15m(pair);
+    let holdersPct = null;
 
     if (liquidityUsd && liquidityUsd < config.minLiquidityUsd) {
       stats.liquidityLow += 1;
@@ -580,6 +719,7 @@ async function pickCandidateDex(connection, tradeLamports) {
       continue;
     }
 
+    let holdersPct = null;
     if (config.maxTop10Pct > 0 && config.maxTop10Pct < 100 && !holdersCheckUnavailable) {
       const holders = await getTopHoldersPct(connection, mintPub, 10);
       if (holders.error) {
@@ -592,9 +732,12 @@ async function pickCandidateDex(connection, tradeLamports) {
           stats.holdersError += 1;
           continue;
         }
-      } else if (holders.pct !== null && holders.pct > config.maxTop10Pct) {
-        stats.holdersTooHigh += 1;
-        continue;
+      } else {
+        holdersPct = holders.pct;
+        if (holders.pct !== null && holders.pct > config.maxTop10Pct) {
+          stats.holdersTooHigh += 1;
+          continue;
+        }
       }
     }
 
@@ -612,14 +755,26 @@ async function pickCandidateDex(connection, tradeLamports) {
       continue;
     }
 
+    const overview = {
+      liquidityUSD: liquidityUsd,
+      volume24hUSD: vol24hUsd,
+    };
+    const rugRisk = computeRugPullRisk({ overview, mintInfo, holdersPct });
+    if (config.rugRiskMaxScore >= 0 && rugRisk.score > config.rugRiskMaxScore) {
+      stats.rugRiskHigh += 1;
+      continue;
+    }
+
     const baseScore = priceChangePct ?? 0;
     const volScore = Math.log10((vol24hUsd || 0) + 1) * 2;
     const liqScore = Math.log10((liquidityUsd || 0) + 1);
+    const rugRiskPenalty = Math.max(0, config.rugRiskWeight || 0) * rugRisk.score;
     const score =
       baseScore +
       volScore +
       liqScore +
-      (priceImpactPct !== null ? (config.maxPriceImpactPct - priceImpactPct) / 2 : 0);
+      (priceImpactPct !== null ? (config.maxPriceImpactPct - priceImpactPct) / 2 : 0) -
+      rugRiskPenalty;
 
     const volatility = priceChangePct === null ? null : { ok: true, rangePct: Math.abs(priceChangePct), chopPct: 0 };
     const signal = config.momentumMode ? null : { ok: true, score: baseScore };
@@ -637,6 +792,19 @@ async function pickCandidateDex(connection, tradeLamports) {
       volatility,
       priceImpactPct,
       dexPair: pair,
+      rugRisk,
+    });
+    appendRugPullSample({
+      source: "dexscreener",
+      address,
+      name,
+      entryOk: true,
+      score,
+      rugRisk,
+      priceImpactPct,
+      signal,
+      momentum,
+      volatility,
     });
   }
 
@@ -645,7 +813,7 @@ async function pickCandidateDex(connection, tradeLamports) {
 
   pushLog(
     "warn",
-    `DexScreener filter stats: total ${stats.total} | lowLiq ${stats.liquidityLow} lowVol24 ${stats.vol24hLow} lowVol15 ${stats.vol15mLow} lowChange ${stats.priceChangeLow} impact ${stats.priceImpactHigh} auth ${stats.authority} holders ${stats.holdersTooHigh}`
+    `DexScreener filter stats: total ${stats.total} | lowLiq ${stats.liquidityLow} lowVol24 ${stats.vol24hLow} lowVol15 ${stats.vol15mLow} lowChange ${stats.priceChangeLow} impact ${stats.priceImpactHigh} rugRisk ${stats.rugRiskHigh} auth ${stats.authority} holders ${stats.holdersTooHigh}`
   );
   return null;
 }
@@ -677,6 +845,11 @@ async function pickCandidate(connection, tradeLamports) {
 }
 
 async function sendSwap(connection, keypair, quoteResponse) {
+  if (isSimulatorMode()) {
+    const simulatedSig = `SIM-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 7)}`;
+    pushLog("info", `Simulated swap (no transaction sent): ${simulatedSig}`);
+    return simulatedSig;
+  }
   const swap = await getSwapTx(quoteResponse, keypair.publicKey.toBase58());
   const swapTxB64 = swap?.swapTransaction;
   if (!swapTxB64) throw new Error("Missing swapTransaction in response.");
@@ -687,13 +860,10 @@ async function sendSwap(connection, keypair, quoteResponse) {
   return sig;
 }
 
-async function enterPosition(connection, keypair, tradeLamports, candidate) {
-  const adjustedLamports = await adjustTradeLamportsForAtaRent(
-    connection,
-    keypair.publicKey,
-    candidate.address,
-    tradeLamports
-  );
+async function enterPosition(connection, keypair, tradeLamports, candidate, { simulate = false } = {}) {
+  const adjustedLamports = simulate
+    ? tradeLamports
+    : await adjustTradeLamportsForAtaRent(connection, keypair.publicKey, candidate.address, tradeLamports);
   const freshQuote = await getQuote({
     inputMint: SOL_MINT,
     outputMint: candidate.address,
@@ -706,7 +876,7 @@ async function enterPosition(connection, keypair, tradeLamports, candidate) {
   if (priceImpactPct !== null && priceImpactPct > config.maxPriceImpactPct) {
     throw new Error(`Price impact too high: ${priceImpactPct.toFixed(2)}%`);
   }
-  const sig = await sendSwap(connection, keypair, freshQuote);
+  const sig = simulate ? `sim-${nowMs()}` : await sendSwap(connection, keypair, freshQuote);
 
   const outAmount = Number(freshQuote.outAmount || 0);
   const mintInfo = await getMintInfo(connection, new PublicKey(candidate.address));
@@ -723,12 +893,17 @@ async function enterPosition(connection, keypair, tradeLamports, candidate) {
 }
 
 async function exitPosition(connection, keypair, position) {
-  const amountRaw = await getTokenBalanceRaw(
-    connection,
-    keypair.publicKey,
-    new PublicKey(position.mint)
-  );
-  if (amountRaw <= 0n) throw new Error("No token amount to sell.");
+  let amountRaw;
+  if (isSimulatorMode()) {
+    amountRaw = Math.floor(position.tokenAmount * 10 ** position.tokenDecimals);
+  } else {
+    amountRaw = await getTokenBalanceRaw(
+      connection,
+      keypair.publicKey,
+      new PublicKey(position.mint)
+    );
+    if (amountRaw <= 0n) throw new Error("No token amount to sell.");
+  }
 
   const quote = await getQuote({
     inputMint: position.mint,
@@ -740,7 +915,8 @@ async function exitPosition(connection, keypair, position) {
   });
 
   const sig = await sendSwap(connection, keypair, quote);
-  return sig;
+  const outSol = Number(quote.outAmount || 0) / LAMPORTS_PER_SOL;
+  return { sig, outSol, quote };
 }
 
 async function estimateTokenValueSol(position) {
@@ -767,22 +943,53 @@ async function shouldExtendHold(position) {
 async function run() {
   requireConfig();
   const connection = createConnection(config.rpcUrl);
-  const keypair = loadKeypair();
   const state = loadState();
+  const isSimulator = config.simulatorMode;
+  const keypair = isSimulator ? null : loadKeypair();
+
+  const getActivePosition = () => (isSimulator ? state.simPosition : state.position);
+  const setActivePosition = (value) => {
+    if (isSimulator) state.simPosition = value;
+    else state.position = value;
+  };
+
+  const ensureNumber = (value, fallback = 0) => (Number.isFinite(value) ? value : fallback);
+  state.simBalanceSol = ensureNumber(state.simBalanceSol, 0);
+  state.simBalanceUsd = ensureNumber(state.simBalanceUsd, 0);
+
+  const resolveSimulatorStartBalance = async () => {
+    if (config.simulatorStartSol > 0) return config.simulatorStartSol;
+    if (config.simulatorStartUsd > 0) {
+      const solUsd = await getSolUsdPriceCached();
+      if (solUsd > 0) return config.simulatorStartUsd / solUsd;
+    }
+    return 0;
+  };
+
+  if (isSimulator && state.simBalanceSol <= 0) {
+    const startSol = await resolveSimulatorStartBalance();
+    if (startSol > 0) {
+      state.simBalanceSol = startSol;
+      const solUsd = await getSolUsdPriceCached();
+      state.simBalanceUsd = state.simBalanceSol * solUsd;
+      saveState(state);
+      pushLog("info", `Simulator balance initialized to ${state.simBalanceSol.toFixed(4)} SOL.`);
+    }
+  }
 
   const requestManualExit = () => {
-    if (!state.position) return { ok: false, error: "no_position" };
+    if (!getActivePosition()) return { ok: false, error: "no_position" };
     if (manualExitRequested) {
-      return { ok: true, requested: true, mint: state.position.mint, alreadyQueued: true };
+      return { ok: true, requested: true, mint: getActivePosition().mint, alreadyQueued: true };
     }
     manualExitRequested = true;
     manualExitRequestedAt = nowMs();
     pushLog("warn", "Manual sell requested. Exiting on next loop.");
-    return { ok: true, requested: true, mint: state.position.mint, queuedAt: manualExitRequestedAt };
+    return { ok: true, requested: true, mint: getActivePosition().mint, queuedAt: manualExitRequestedAt };
   };
 
   const requestResetCooldown = () => {
-    if (state.position) return { ok: false, error: "position_open" };
+    if (getActivePosition()) return { ok: false, error: "position_open" };
     const current = getCooldown(state);
     if (current.remainingSec <= 0) {
       return { ok: true, reset: false, remainingSec: 0 };
@@ -795,11 +1002,24 @@ async function run() {
     return { ok: true, reset: true, remainingSec: updated.remainingSec };
   };
 
+  const requestSetMode = (mode) => {
+    const normalized = parseMode(mode);
+    if (!normalized) return { ok: false, error: "invalid_mode" };
+    if (currentMode === normalized) {
+      return { ok: true, mode: currentMode, changed: false };
+    }
+    currentMode = normalized;
+    broadcastUi({ mode: currentMode });
+    pushLog("warn", `Mode switched to ${currentMode}.`);
+    return { ok: true, mode: currentMode, changed: true };
+  };
+
   uiServer = startServer({
     port: config.port,
     host: config.host,
     onSellNow: requestManualExit,
     onResetCooldown: requestResetCooldown,
+    onSetMode: requestSetMode,
   });
   pushLog("info", `UI available at http://localhost:${config.port}`);
 
@@ -809,21 +1029,21 @@ async function run() {
       const cooldown = getCooldown(state);
       const shouldUpdateUi = now - lastUiUpdateMs >= config.uiRefreshSeconds * 1000;
       const shouldScan =
-        !state.position &&
+        !getActivePosition() &&
         cooldown.remainingSec <= 0 &&
         now - lastScanMs >= config.scanIntervalSeconds * 1000;
 
       let solBalance = null;
       let solUsd = null;
-      if (shouldUpdateUi || shouldScan || state.position) {
-        solBalance = await getSolBalance(connection, keypair.publicKey);
+      if (shouldUpdateUi || shouldScan || getActivePosition()) {
+        solBalance = isSimulator ? state.simBalanceSol : await getSolBalance(connection, keypair.publicKey);
       }
-      if (shouldUpdateUi || state.position || shouldScan) {
+      if (shouldUpdateUi || getActivePosition() || shouldScan) {
         solUsd = await getSolUsdPriceCached();
       }
 
-      if (state.position) {
-        const position = state.position;
+      if (getActivePosition()) {
+        const position = getActivePosition();
         const heldMinutes = (now - position.entryTimeMs) / 60000;
         const timeStopHit = heldMinutes >= config.exitHardMinutes;
         const softStopHit = heldMinutes >= config.exitSoftMinutes;
@@ -840,12 +1060,26 @@ async function run() {
           pnlPct = pctChange(position.entrySol, outSol);
           const solUsdNow = solUsd ?? (await getSolUsdPriceCached());
           profitUsd = (outSol - position.entrySol) * solUsdNow;
-          const sig = await exitPosition(connection, keypair, position);
+          const exitResult = await exitPosition(connection, keypair, position, { simulate: isSimulator });
           manualExitRequested = false;
           pushLog("info", `Exit tx: ${sig}`);
           pushTrade({ side: "sell", mint: position.mint, pnlPct, profitUsd, sig, reason: "manual" });
+          pushTrainingEvent(
+            buildTrainingEvent({
+              event: "exit",
+              side: "sell",
+              mint: position.mint,
+              sig,
+              pnlPct,
+              profitUsd,
+              heldMinutes,
+              decision: buildDecisionMetadata("manual", getCooldown(state)),
+              entrySnapshot: position.entrySnapshot ?? null,
+            })
+          );
           state.position = null;
           state.lastExitTimeMs = nowMs();
+          if (isSimulator) state.simBalanceUsd = state.simBalanceSol * (solUsdNow || 0);
           saveState(state);
           continue;
         }
@@ -877,6 +1111,19 @@ async function run() {
           const sig = await exitPosition(connection, keypair, position);
           pushLog("info", `Exit tx: ${sig}`);
           pushTrade({ side: "sell", mint: position.mint, pnlPct, profitUsd, sig, reason: "account_stop" });
+          pushTrainingEvent(
+            buildTrainingEvent({
+              event: "exit",
+              side: "sell",
+              mint: position.mint,
+              sig,
+              pnlPct,
+              profitUsd,
+              heldMinutes,
+              decision: buildDecisionMetadata("account_stop", getCooldown(state)),
+              entrySnapshot: position.entrySnapshot ?? null,
+            })
+          );
           state.position = null;
           state.lastExitTimeMs = nowMs();
           saveState(state);
@@ -888,6 +1135,19 @@ async function run() {
           const sig = await exitPosition(connection, keypair, position);
           pushLog("info", `Exit tx: ${sig}`);
           pushTrade({ side: "sell", mint: position.mint, pnlPct, profitUsd, sig, reason: "stop_loss" });
+          pushTrainingEvent(
+            buildTrainingEvent({
+              event: "exit",
+              side: "sell",
+              mint: position.mint,
+              sig,
+              pnlPct,
+              profitUsd,
+              heldMinutes,
+              decision: buildDecisionMetadata("stop_loss", getCooldown(state)),
+              entrySnapshot: position.entrySnapshot ?? null,
+            })
+          );
           state.position = null;
           state.lastExitTimeMs = nowMs();
           saveState(state);
@@ -899,6 +1159,19 @@ async function run() {
           const sig = await exitPosition(connection, keypair, position);
           pushLog("info", `Exit tx: ${sig}`);
           pushTrade({ side: "sell", mint: position.mint, pnlPct, profitUsd, sig, reason: "take_profit" });
+          pushTrainingEvent(
+            buildTrainingEvent({
+              event: "exit",
+              side: "sell",
+              mint: position.mint,
+              sig,
+              pnlPct,
+              profitUsd,
+              heldMinutes,
+              decision: buildDecisionMetadata("take_profit", getCooldown(state)),
+              entrySnapshot: position.entrySnapshot ?? null,
+            })
+          );
           state.position = null;
           state.lastExitTimeMs = nowMs();
           saveState(state);
@@ -910,6 +1183,19 @@ async function run() {
           const sig = await exitPosition(connection, keypair, position);
           pushLog("info", `Exit tx: ${sig}`);
           pushTrade({ side: "sell", mint: position.mint, pnlPct, profitUsd, sig, reason: "hard_time" });
+          pushTrainingEvent(
+            buildTrainingEvent({
+              event: "exit",
+              side: "sell",
+              mint: position.mint,
+              sig,
+              pnlPct,
+              profitUsd,
+              heldMinutes,
+              decision: buildDecisionMetadata("hard_time", getCooldown(state)),
+              entrySnapshot: position.entrySnapshot ?? null,
+            })
+          );
           state.position = null;
           state.lastExitTimeMs = nowMs();
           saveState(state);
@@ -923,6 +1209,19 @@ async function run() {
             const sig = await exitPosition(connection, keypair, position);
             pushLog("info", `Exit tx: ${sig}`);
             pushTrade({ side: "sell", mint: position.mint, pnlPct, profitUsd, sig, reason: "soft_time" });
+            pushTrainingEvent(
+              buildTrainingEvent({
+                event: "exit",
+                side: "sell",
+                mint: position.mint,
+                sig,
+                pnlPct,
+                profitUsd,
+                heldMinutes,
+                decision: buildDecisionMetadata("soft_time", getCooldown(state)),
+                entrySnapshot: position.entrySnapshot ?? null,
+              })
+            );
             state.position = null;
             state.lastExitTimeMs = nowMs();
             saveState(state);
@@ -983,7 +1282,8 @@ async function run() {
         }
 
         const totalUsd = solBalance * solUsd;
-        const tradeSol = Math.max(0, solBalance - config.feeBufferSol);
+        const feeBufferSol = isSimulator ? config.simulatorFeeBufferSol : config.feeBufferSol;
+        const tradeSol = Math.max(0, solBalance - feeBufferSol);
         if (tradeSol <= 0) {
           pushLog("warn", "Not enough SOL after fee buffer.");
           await sleep(LOOP_MS);
@@ -1009,18 +1309,38 @@ async function run() {
             "info",
             `Entering ${candidate.name || candidate.address} impact ${candidate.priceImpactPct?.toFixed?.(2) ?? "?"}%${volatilityNote}${momentumNote}`
           );
+          const entrySnapshot = buildEntrySnapshot(candidate);
           const position = await enterPosition(connection, keypair, tradeLamports, candidate);
+          position.entrySnapshot = entrySnapshot;
           state.position = position;
           state.lastTradeTimeMs = nowMs();
+          if (isSimulator) {
+            state.simBalanceSol = Math.max(0, state.simBalanceSol - position.entrySol);
+            state.simBalanceUsd = state.simBalanceSol * solUsd;
+          }
           saveState(state);
+          const entryCooldown = getCooldown(state);
           pushTrade({
             side: "buy",
             mint: position.mint,
             pnlPct: 0,
             profitUsd: 0,
             sig: position.signature,
-            reason: "entry",
+            reason: isSimulatorMode() ? "entry_simulated" : "entry",
           });
+          pushTrainingEvent(
+            buildTrainingEvent({
+              event: "entry",
+              side: "buy",
+              mint: position.mint,
+              sig: position.signature,
+              pnlPct: 0,
+              profitUsd: 0,
+              heldMinutes: 0,
+              decision: buildDecisionMetadata("entry", entryCooldown),
+              entrySnapshot,
+            })
+          );
           pushLog("info", `Entry tx: ${position.signature}`);
         }
       }

@@ -178,6 +178,7 @@ export function computeSignal(candles) {
     rsi: rsiVal,
     emaFast,
     emaSlow,
+    bollinger: bb,
     volumeSpike,
     valley,
     trend,

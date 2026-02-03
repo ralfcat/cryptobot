@@ -8,6 +8,7 @@
   "scripts": {
     "start": "node src/index.js",
     "train:model": "node scripts/train_model.js"
+    "orchestrate": "node src/orchestrator.js"
   },
   "dependencies": {
     "@solana/web3.js": "^1.98.4",

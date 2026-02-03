@@ -1,0 +1,73 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "TrainingEvent",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["t", "event", "side", "mint", "sig", "decision"],
+  "properties": {
+    "t": {
+      "type": "integer",
+      "description": "Event timestamp in milliseconds."
+    },
+    "event": {
+      "type": "string",
+      "enum": ["entry", "exit"]
+    },
+    "side": {
+      "type": "string",
+      "enum": ["buy", "sell"]
+    },
+    "mint": { "type": "string" },
+    "sig": { "type": "string" },
+    "pnlPct": { "type": ["number", "null"] },
+    "profitUsd": { "type": ["number", "null"] },
+    "heldMinutes": { "type": ["number", "null"] },
+    "decision": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["reason", "cooldown", "thresholds"],
+      "properties": {
+        "reason": { "type": "string" },
+        "cooldown": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["minutes", "nextEntryMs", "remainingSec"],
+          "properties": {
+            "minutes": { "type": "number" },
+            "nextEntryMs": { "type": "number" },
+            "remainingSec": { "type": "number" }
+          }
+        },
+        "thresholds": {
+          "type": "object",
+          "additionalProperties": true
+        }
+      }
+    },
+    "entrySnapshot": {
+      "type": ["object", "null"],
+      "additionalProperties": false,
+      "properties": {
+        "provider": { "type": ["string", "null"] },
+        "address": { "type": ["string", "null"] },
+        "name": { "type": ["string", "null"] },
+        "score": { "type": ["number", "null"] },
+        "signal": { "type": ["object", "null"] },
+        "momentum": { "type": ["object", "null"] },
+        "volatility": { "type": ["object", "null"] },
+        "priceImpactPct": { "type": ["number", "null"] },
+        "liquidityUsd": { "type": ["number", "null"] },
+        "volume": {
+          "type": ["object", "null"],
+          "additionalProperties": false,
+          "properties": {
+            "vol24hUsd": { "type": ["number", "null"] },
+            "vol15mUsd": { "type": ["number", "null"] }
+          }
+        },
+        "holdersPct": { "type": ["number", "null"] },
+        "marketContext": { "type": ["object", "null"] }
+      }
+    }
+  }
+}

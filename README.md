@@ -37,6 +37,22 @@ npm start
 
 Open the dashboard at `http://localhost:8787` (or whatever `PORT` you set).
 
+## Training dataset builder
+
+Build reproducible ML datasets from `training_events.jsonl` and `trades.jsonl` (written by the bot). The builder merges features with labels derived from realized PnL or forward-return windows using stored OHLCV snapshots, and writes a versioned Parquet dataset.
+
+```bash
+node training/build_dataset.js --events training_events.jsonl --trades trades.jsonl --date 2024-01-15
+```
+
+Output files are written to `data/datasets/{date}/train.parquet` with a `metadata.json` summary. You can override defaults with:
+
+```bash
+node training/build_dataset.js --windows 5,15,60 --pnl-window-hours 24 --out data/datasets
+```
+
+To enable Parquet output, install `parquetjs-lite` (network restrictions may require vendoring it). If the dependency is unavailable, the builder falls back to `train.jsonl` and reports the failure.
+
 ## Core rules implemented
 - **All-in trade** using available SOL minus a small fee buffer.
 - **Stop loss** at -20%.
@@ -54,6 +70,12 @@ Open the dashboard at `http://localhost:8787` (or whatever `PORT` you set).
 
 ## Config
 See `.env.example` for parameters.
+
+### Rug-pull tuning roadmap
+See `docs/rugpull_tuning.md` for the phased plan to collect data, label rug events, and tune the simulator with open-source modeling tools.
+
+### Rug-pull modeling (Python)
+See `modeling/README.md` for the Python baseline used to train and score a rug-pull risk model from `rugpull_samples.jsonl`.
 
 ### Momentum mode (optional)
 Set `MOMENTUM_MODE=1` to rank candidates by recent price change (short + long lookback) instead of the RSI/EMA signal. Use the `MOMENTUM_*` settings in `.env.example` to tune the lookbacks, minimum % change, and weighting.
