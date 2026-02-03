@@ -49,6 +49,10 @@ const config = {
   scanIntervalSeconds: num("SCAN_INTERVAL_SECONDS", 30),
 
   feeBufferSol: num("FEE_BUFFER_SOL", 0.01),
+  maxOpenPositions: num("MAX_OPEN_POSITIONS", 1),
+  tradeAllocationPct: num("TRADE_ALLOCATION_PCT", 100),
+  maxPositionSol: num("MAX_POSITION_SOL", 0),
+  minRemainingSol: num("MIN_REMAINING_SOL", 0),
   maxSlippageBps: num("MAX_SLIPPAGE_BPS", 300),
   maxPriceImpactPct: num("MAX_PRICE_IMPACT_PCT", 5),
   stopLossPct: num("STOP_LOSS_PCT", 0.2),
@@ -60,6 +64,16 @@ const config = {
   simulatorStartSol: num("SIMULATOR_START_SOL", 0),
   simulatorStartUsd: num("SIMULATOR_START_USD", 0),
   simulatorFeeBufferSol: num("SIMULATOR_FEE_BUFFER_SOL", 0.01),
+  metricsEnabled: bool("METRICS_ENABLED", true),
+  metricsPath: process.env.METRICS_PATH || "/metrics",
+  statsApiKey: process.env.STATS_API_KEY || "",
+  discordBotToken: process.env.DISCORD_BOT_TOKEN || "",
+  discordCommandPrefix: process.env.DISCORD_COMMAND_PREFIX || "!",
+  discordStatsUrl: process.env.DISCORD_STATS_URL || "",
+  discordAllowedChannelIds: (process.env.DISCORD_ALLOWED_CHANNEL_IDS || "")
+    .split(",")
+    .map((value) => value.trim())
+    .filter(Boolean),
 
   exitSoftMinutes: num("EXIT_SOFT_MINUTES", 15),
   exitHardMinutes: num("EXIT_HARD_MINUTES", 60),

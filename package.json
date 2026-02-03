@@ -7,6 +7,7 @@
   "main": "src/index.js",
   "scripts": {
     "start": "node src/index.js",
+    "discord:bot": "node src/discord.js",
     "train:model": "node scripts/train_model.js",
     "orchestrate": "node src/orchestrator.js",
     "test": "node --test tests/unit/**/*.test.js tests/e2e/**/*.test.js",
@@ -19,9 +20,11 @@
     "@solana/spl-token": "^0.4.8",
     "@solana/web3.js": "^1.98.4",
     "bs58": "^5.0.0",
+    "discord.js": "^14.16.3",
     "dotenv": "^16.4.5",
     "express": "^4.19.2",
     "node-fetch": "^3.3.2",
+    "prom-client": "^15.1.3",
     "ws": "^8.17.0"
   },
   "optionalDependencies": {
