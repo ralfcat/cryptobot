@@ -1,0 +1,28 @@
+version: "3.9"
+
+services:
+  bot:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    environment:
+      RPC_URL: ${RPC_URL}
+      BIRDEYE_API_KEY: ${BIRDEYE_API_KEY}
+      JUP_API_KEY: ${JUP_API_KEY}
+      KEYPAIR_PATH: ${KEYPAIR_PATH}
+      PORT: ${PORT:-8787}
+    ports:
+      - "${PORT:-8787}:8787"
+    volumes:
+      - ./data/datasets:/app/data/datasets
+      - ./data/models:/app/data/models
+
+  trainer:
+    build:
+      context: ./trainer
+      dockerfile: Dockerfile
+    volumes:
+      - ./data/datasets:/trainer/data
+      - ./data/models:/trainer/models
+
+volumes: {}
